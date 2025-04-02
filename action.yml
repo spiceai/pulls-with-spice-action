@@ -1,0 +1,40 @@
+name: 'Pulls with Spice Action'
+description: 'Ensures GitHub pull requests meet quality standards with extra flavor'
+author: 'Luke Kim (Spice AI)'
+
+inputs:
+  require_description_min_length:
+    description: 'Minimum length of the pull request description'
+    required: false
+    default: '0'
+  require_title_min_length:
+    description: 'Minimum length of the pull request title'
+    required: false
+    default: '10'
+  required_labels_any:
+    description: 'Any of these labels must be present on the pull request (comma-separated)'
+    required: false
+  required_labels_all:
+    description: 'All of these labels must be present on the pull request (comma-separated)'
+    required: false
+  banned_labels:
+    description: 'None of these labels should be present on the pull request (comma-separated)'
+    required: false
+  require_assignee:
+    description: 'Whether to require at least one assignee'
+    required: false
+    default: 'false'
+  required_issue_types:
+    description: 'Pull request must include one of these issue types in conventional commit format (comma-separated)'
+    required: false
+  custom_error_messages:
+    description: 'JSON object with custom error messages for various checks'
+    required: false
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
+
+branding:
+  icon: 'check-circle'
+  color: 'red'
