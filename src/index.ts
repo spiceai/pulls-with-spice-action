@@ -21,6 +21,9 @@ interface ContentObject {
   draft?: boolean;
 }
 
+// Collect errors instead of failing immediately
+const errorMessages: string[] = [];
+
 async function run(): Promise<void> {
   try {
     // Get details from context - pull request only
@@ -44,6 +47,15 @@ async function run(): Promise<void> {
     checkIssueType(pullRequest);
     checkDraft(pullRequest);
 
+    // If we have collected any errors, post them to the PR and fail
+    if (errorMessages.length > 0) {
+      await postErrorsToPullRequest(errorMessages);
+      core.setFailed(
+        'Pull request quality checks failed. See PR comments for details.'
+      );
+      return;
+    }
+
     core.info('All pull request quality checks passed!');
   } catch (error) {
     if (error instanceof Error) {
@@ -54,13 +66,61 @@ async function run(): Promise<void> {
   }
 }
 
+async function postErrorsToPullRequest(errors: string[]): Promise<void> {
+  try {
+    const token = core.getInput('github_token');
+    if (!token) {
+      core.warning(
+        'No GitHub token provided. Unable to post comments to the PR.'
+      );
+      return;
+    }
+
+    const octokit = github.getOctokit(token);
+    const context = github.context;
+
+    // Make sure we have a PR number
+    if (!context.payload.pull_request?.number) {
+      core.warning(
+        'Could not find pull request number in context. Unable to post comments.'
+      );
+      return;
+    }
+
+    const prNumber = context.payload.pull_request.number;
+
+    // Format the comment message
+    const errorMessage =
+      `## 🔍 Pull Request Quality Check Failed\n\n` +
+      `The following issues were found with your pull request:\n\n` +
+      errors.map((err) => `- ${err}`).join('\n') +
+      `\n\nPlease address these issues and update your pull request.`;
+
+    // Post the comment to the PR
+    await octokit.rest.issues.createComment({
+      ...context.repo,
+      issue_number: prNumber,
+      body: errorMessage,
+    });
+
+    core.info('Posted quality check errors to pull request.');
+  } catch (error) {
+    if (error instanceof Error) {
+      core.warning(`Failed to post comments to PR: ${error.message}`);
+    } else {
+      core.warning('Failed to post comments to PR: Unknown error');
+    }
+  }
+}
+
 function checkTitle(pullRequest: ContentObject): void {
   const minLength = parseInt(core.getInput('require_title_min_length'), 10);
   if (minLength && pullRequest.title.length < minLength) {
     const errorMsg =
       getCustomErrorMessage('title_too_short') ||
       `Pull request title is too short. Minimum length is ${minLength} characters.`;
-    core.setFailed(errorMsg);
+    // Instead of failing immediately, collect the error
+    errorMessages.push(errorMsg);
   }
 }
 
@@ -73,7 +133,8 @@ function checkDescription(pullRequest: ContentObject): void {
     const errorMsg =
       getCustomErrorMessage('description_too_short') ||
       `Pull request description is too short. Minimum length is ${minLength} characters.`;
-    core.setFailed(errorMsg);
+    // Instead of failing immediately, collect the error
+    errorMessages.push(errorMsg);
   }
 }
 
@@ -92,7 +153,7 @@ function checkLabels(pullRequest: ContentObject): void {
 }
 
 function checkIssueType(pullRequest: ContentObject): void {
-  const requiredIssueTypes = getInputArray('REQUIRED_ISSUE_TYPES');
+  const requiredIssueTypes = getInputArray('required_issue_types');
   if (requiredIssueTypes.length === 0) {
     return; // No issue type requirements
   }
@@ -113,7 +174,8 @@ function checkIssueType(pullRequest: ContentObject): void {
     const errorMsg =
       getCustomErrorMessage('invalid_issue_type') ||
       `Pull request must include one of these issue types: ${requiredIssueTypes.join(', ')}. Format should be "type: description" or "type(scope): description".`;
-    core.setFailed(errorMsg);
+    // Instead of failing immediately, collect the error
+    errorMessages.push(errorMsg);
   }
 }
 
@@ -128,7 +190,8 @@ function enforceAnyLabels(labels: string[]): void {
       `Please select at least one of the required labels for this pull request: ${requiredLabelsAny.join(
         ', '
       )}`;
-    core.setFailed(errorMsg);
+    // Instead of failing immediately, collect the error
+    errorMessages.push(errorMsg);
   }
 }
 
@@ -144,7 +207,8 @@ function enforceAllLabels(labels: string[]): void {
     const errorMsg =
       getCustomErrorMessage('missing_all_labels') ||
       `The following required labels are missing from this pull request: ${missingLabels.join(', ')}`;
-    core.setFailed(errorMsg);
+    // Instead of failing immediately, collect the error
+    errorMessages.push(errorMsg);
   }
 }
 
@@ -155,7 +219,8 @@ function enforceBannedLabels(labels: string[]): void {
     const errorMsg =
       getCustomErrorMessage('banned_label') ||
       `The label "${bannedLabel}" is not allowed for this pull request.`;
-    core.setFailed(errorMsg);
+    // Instead of failing immediately, collect the error
+    errorMessages.push(errorMsg);
   }
 }
 
@@ -168,7 +233,8 @@ function checkAssignees(pullRequest: ContentObject): void {
     const errorMsg =
       getCustomErrorMessage('no_assignee') ||
       'At least one assignee is required for this pull request.';
-    core.setFailed(errorMsg);
+    // Instead of failing immediately, collect the error
+    errorMessages.push(errorMsg);
   }
 }
 
@@ -178,7 +244,8 @@ function checkDraft(pullRequest: ContentObject): void {
     const errorMsg =
       getCustomErrorMessage('is_draft') ||
       'Draft pull requests are not allowed. Please mark as ready for review.';
-    core.setFailed(errorMsg);
+    // Instead of failing immediately, collect the error
+    errorMessages.push(errorMsg);
   }
 }
 

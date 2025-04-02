@@ -10,6 +10,7 @@ A GitHub Action that enforces quality standards for pull requests with extra fla
 - Prevents the use of certain labels
 - Requires assignees for PRs
 - Enforces issue type requirements in PR body or title
+- Posts error messages as comments on the pull request when checks fail
 - Customizable error messages
 - Built with TypeScript for improved reliability and maintainability
 
@@ -30,6 +31,7 @@ jobs:
     steps:
       - uses: spiceai/pulls-with-spice-action@v1
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           require_title_min_length: '10'
           require_description_min_length: '50'
           required_labels_any: 'bug,feature,enhancement'
@@ -43,17 +45,18 @@ jobs:
 
 ## Inputs
 
-| Input                            | Description                                                        | Required | Default |
-| -------------------------------- | ------------------------------------------------------------------ | -------- | ------- |
-| `require_description_min_length` | Minimum length of the PR description                               | No       | `0`     |
-| `require_title_min_length`       | Minimum length of the PR title                                     | No       | `10`    |
-| `required_labels_any`            | Any of these labels must be present on the PR (comma-separated)    | No       | -       |
-| `required_labels_all`            | All of these labels must be present on the PR (comma-separated)    | No       | -       |
-| `banned_labels`                  | None of these labels should be present on the PR (comma-separated) | No       | -       |
-| `require_assignee`               | Whether to require at least one assignee                           | No       | `false` |
-| `enforce_draft`                  | Whether to enforce non-draft pull requests                         | No       | `false` |
-| `required_issue_types`           | PR must include one of these issue types (comma-separated)         | No       | -       |
-| `custom_error_messages`          | JSON object with custom error messages for various checks          | No       | -       |
+| Input                            | Description                                                        | Required | Default               |
+| -------------------------------- | ------------------------------------------------------------------ | -------- | --------------------- |
+| `github_token`                   | GitHub token for posting comments to PR thread                     | No       | `${{ github.token }}` |
+| `require_description_min_length` | Minimum length of the PR description                               | No       | `0`                   |
+| `require_title_min_length`       | Minimum length of the PR title                                     | No       | `10`                  |
+| `required_labels_any`            | Any of these labels must be present on the PR (comma-separated)    | No       | -                     |
+| `required_labels_all`            | All of these labels must be present on the PR (comma-separated)    | No       | -                     |
+| `banned_labels`                  | None of these labels should be present on the PR (comma-separated) | No       | -                     |
+| `require_assignee`               | Whether to require at least one assignee                           | No       | `false`               |
+| `enforce_draft`                  | Whether to enforce non-draft pull requests                         | No       | `false`               |
+| `required_issue_types`           | PR must include one of these issue types (comma-separated)         | No       | -                     |
+| `custom_error_messages`          | JSON object with custom error messages for various checks          | No       | -                     |
 
 ## Issue Type Enforcement
 

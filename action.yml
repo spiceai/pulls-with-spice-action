@@ -34,6 +34,10 @@ inputs:
   custom_error_messages:
     description: 'JSON object with custom error messages for various checks'
     required: false
+  github_token:
+    description: 'GitHub token for posting comments to PR thread'
+    required: false
+    default: '${{ github.token }}'
 
 runs:
   using: 'node20'
