@@ -37,4 +37,4 @@ runs:
 
 branding:
   icon: 'check-circle'
-  color: 'red'
+  color: 'orange'
