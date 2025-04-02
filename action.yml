@@ -24,6 +24,10 @@ inputs:
     description: 'Whether to require at least one assignee'
     required: false
     default: 'false'
+  enforce_draft:
+    description: 'Whether to enforce non-draft pull requests'
+    required: false
+    default: 'false'
   required_issue_types:
     description: 'Pull request must include one of these issue types in conventional commit format (comma-separated)'
     required: false

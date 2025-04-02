@@ -37,6 +37,7 @@ jobs:
           banned_labels: 'invalid,wontfix'
           require_assignee: 'true'
           required_issue_types: 'bug,enhancement,task'
+          enforce_draft: 'false'
           custom_error_messages: '{"title_too_short": "Please provide a more descriptive title."}'
 ```
 
@@ -50,6 +51,7 @@ jobs:
 | `required_labels_all`            | All of these labels must be present on the PR (comma-separated)    | No       | -       |
 | `banned_labels`                  | None of these labels should be present on the PR (comma-separated) | No       | -       |
 | `require_assignee`               | Whether to require at least one assignee                           | No       | `false` |
+| `enforce_draft`                  | Whether to enforce non-draft pull requests                         | No       | `false` |
 | `required_issue_types`           | PR must include one of these issue types (comma-separated)         | No       | -       |
 | `custom_error_messages`          | JSON object with custom error messages for various checks          | No       | -       |
 
@@ -74,6 +76,7 @@ You can provide custom error messages using a JSON object. The following keys ar
 - `banned_label` - Custom message for when a banned label is used
 - `no_assignee` - Custom message for when an assignee is required but missing
 - `invalid_issue_type` - Custom message for when the required issue type is missing
+- `is_draft` - Custom message for when a draft PR is not allowed
 
 ## Development
 

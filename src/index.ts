@@ -18,6 +18,7 @@ interface ContentObject {
   body?: string;
   labels?: Label[];
   assignees?: User[];
+  draft?: boolean;
 }
 
 async function run(): Promise<void> {
@@ -41,6 +42,7 @@ async function run(): Promise<void> {
     checkLabels(pullRequest);
     checkAssignees(pullRequest);
     checkIssueType(pullRequest);
+    checkDraft(pullRequest);
 
     core.info('All pull request quality checks passed!');
   } catch (error) {
@@ -166,6 +168,16 @@ function checkAssignees(pullRequest: ContentObject): void {
     const errorMsg =
       getCustomErrorMessage('no_assignee') ||
       'At least one assignee is required for this pull request.';
+    core.setFailed(errorMsg);
+  }
+}
+
+function checkDraft(pullRequest: ContentObject): void {
+  const enforceDraft = core.getInput('enforce_draft') === 'true';
+  if (enforceDraft && pullRequest.draft) {
+    const errorMsg =
+      getCustomErrorMessage('is_draft') ||
+      'Draft pull requests are not allowed. Please mark as ready for review.';
     core.setFailed(errorMsg);
   }
 }

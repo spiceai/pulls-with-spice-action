@@ -1,6 +1,6 @@
 {
     "name": "pulls-with-spice-action",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "description": "GitHub Action to enforce quality standards for pull requests with extra spice",
     "main": "dist/index.js",
     "scripts": {
