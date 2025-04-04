@@ -12,7 +12,6 @@ A GitHub Action that enforces quality standards for pull requests with extra fla
 - Enforces issue type requirements in PR body or title
 - Posts error messages as comments on the pull request when checks fail
 - Customizable error messages
-- Built with TypeScript for improved reliability and maintainability
 
 ## Usage
 
