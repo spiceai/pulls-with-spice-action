@@ -28,6 +28,9 @@ on:
 jobs:
   enforce-quality:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: spiceai/pulls-with-spice-action@v1
         with:
