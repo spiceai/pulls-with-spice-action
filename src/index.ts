@@ -21,8 +21,9 @@ interface ContentObject {
   draft?: boolean;
 }
 
-// Collect errors instead of failing immediately
+// Collect errors and success messages
 const errorMessages: string[] = [];
+const successMessages: string[] = [];
 
 async function run(): Promise<void> {
   try {
@@ -49,13 +50,14 @@ async function run(): Promise<void> {
 
     // If we have collected any errors, post them to the PR and fail
     if (errorMessages.length > 0) {
-      await postErrorsToPullRequest(errorMessages);
+      await postReportToPullRequest(errorMessages, successMessages);
       core.setFailed(
         'Pull request quality checks failed. See PR comments for details.'
       );
       return;
     }
 
+    await postReportToPullRequest([], successMessages);
     core.info('All pull request quality checks passed!');
   } catch (error) {
     if (error instanceof Error) {
@@ -66,7 +68,10 @@ async function run(): Promise<void> {
   }
 }
 
-async function postErrorsToPullRequest(errors: string[]): Promise<void> {
+async function postReportToPullRequest(
+  errors: string[],
+  successes: string[]
+): Promise<void> {
   try {
     const token = core.getInput('github_token');
     if (!token) {
@@ -90,20 +95,56 @@ async function postErrorsToPullRequest(errors: string[]): Promise<void> {
     const prNumber = context.payload.pull_request.number;
 
     // Format the comment message
-    const errorMessage =
-      `## 🔍 Pull Request Quality Check Failed\n\n` +
-      `The following issues were found with your pull request:\n\n` +
-      errors.map((err) => `- ${err}`).join('\n') +
-      `\n\nPlease address these issues and update your pull request.`;
+    let statusHeader =
+      errors.length > 0
+        ? `## 🔍 Pull Request Quality Check Failed\n\n`
+        : `## ✅ Pull Request Quality Check Passed\n\n`;
 
-    // Post the comment to the PR
-    await octokit.rest.issues.createComment({
+    let statusBody = '';
+
+    // Add all check results (both success and error)
+    const allResults = [...successes, ...errors];
+    if (allResults.length > 0) {
+      statusBody += `### Check Results:\n\n${allResults.join('\n')}\n\n`;
+    }
+
+    // Add failure footer if needed
+    if (errors.length > 0) {
+      statusBody += `Please address these issues and update your pull request.`;
+    }
+
+    const commentBody = statusHeader + statusBody;
+
+    // Check if we already posted a comment on this PR
+    const comments = await octokit.rest.issues.listComments({
       ...context.repo,
       issue_number: prNumber,
-      body: errorMessage,
     });
 
-    core.info('Posted quality check errors to pull request.');
+    // Look for an existing comment from the action by checking the header pattern
+    const botComment = comments.data.find(
+      (comment) =>
+        comment.body?.startsWith('## 🔍 Pull Request Quality Check Failed') ||
+        comment.body?.startsWith('## ✅ Pull Request Quality Check Passed')
+    );
+
+    if (botComment) {
+      // Update the existing comment
+      await octokit.rest.issues.updateComment({
+        ...context.repo,
+        comment_id: botComment.id,
+        body: commentBody,
+      });
+      core.info('Updated existing quality check comment on pull request.');
+    } else {
+      // Post a new comment to the PR
+      await octokit.rest.issues.createComment({
+        ...context.repo,
+        issue_number: prNumber,
+        body: commentBody,
+      });
+      core.info('Posted new quality check comment to pull request.');
+    }
   } catch (error) {
     if (error instanceof Error) {
       core.warning(`Failed to post comments to PR: ${error.message}`);
