@@ -30012,10 +30012,21 @@ async function postReportToPullRequest(errors, successes) {
             ? `## 🔍 Pull Request Quality Check Failed\n\n`
             : `## ✅ Pull Request Quality Check Passed\n\n`;
         let statusBody = '';
-        // Add all check results (both success and error)
-        const allResults = [...successes, ...errors];
-        if (allResults.length > 0) {
-            statusBody += `### Check Results:\n\n${allResults.join('\n')}\n\n`;
+        // Add success messages first
+        if (successes.length > 0) {
+            statusBody += `### Passing checks:\n\n`;
+            successes.forEach((success) => {
+                statusBody += `- ✅ ${success}\n`;
+            });
+            statusBody += `\n`;
+        }
+        // Add error messages next
+        if (errors.length > 0) {
+            statusBody += `### Failed checks:\n\n`;
+            errors.forEach((error) => {
+                statusBody += `- ❌ ${error}\n`;
+            });
+            statusBody += `\n`;
         }
         // Add failure footer if needed
         if (errors.length > 0) {
