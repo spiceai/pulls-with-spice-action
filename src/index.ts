@@ -48,16 +48,17 @@ async function run(): Promise<void> {
     checkIssueType(pullRequest);
     checkDraft(pullRequest);
 
-    // If we have collected any errors, post them to the PR and fail
+    // Post the report to the PR with all messages (errors and success)
+    await postReportToPullRequest(errorMessages, successMessages);
+
+    // If we have any errors, fail the action
     if (errorMessages.length > 0) {
-      await postReportToPullRequest(errorMessages, successMessages);
       core.setFailed(
         'Pull request quality checks failed. See PR comments for details.'
       );
       return;
     }
 
-    await postReportToPullRequest([], successMessages);
     core.info('All pull request quality checks passed!');
   } catch (error) {
     if (error instanceof Error) {
@@ -168,12 +169,17 @@ async function postReportToPullRequest(
 
 function checkTitle(pullRequest: ContentObject): void {
   const minLength = parseInt(core.getInput('require_title_min_length'), 10);
-  if (minLength && pullRequest.title.length < minLength) {
-    const errorMsg =
-      getCustomErrorMessage('title_too_short') ||
-      `Pull request title is too short. Minimum length is ${minLength} characters.`;
-    // Instead of failing immediately, collect the error
-    errorMessages.push(errorMsg);
+  if (minLength) {
+    if (pullRequest.title.length < minLength) {
+      const errorMsg =
+        getCustomErrorMessage('title_too_short') ||
+        `Pull request title is too short. Minimum length is ${minLength} characters.`;
+      errorMessages.push(errorMsg);
+    } else {
+      successMessages.push(
+        `Title meets minimum length requirement (${minLength} characters)`
+      );
+    }
   }
 }
 
@@ -182,12 +188,17 @@ function checkDescription(pullRequest: ContentObject): void {
     core.getInput('require_description_min_length'),
     10
   );
-  if (minLength && (!pullRequest.body || pullRequest.body.length < minLength)) {
-    const errorMsg =
-      getCustomErrorMessage('description_too_short') ||
-      `Pull request description is too short. Minimum length is ${minLength} characters.`;
-    // Instead of failing immediately, collect the error
-    errorMessages.push(errorMsg);
+  if (minLength) {
+    if (!pullRequest.body || pullRequest.body.length < minLength) {
+      const errorMsg =
+        getCustomErrorMessage('description_too_short') ||
+        `Pull request description is too short. Minimum length is ${minLength} characters.`;
+      errorMessages.push(errorMsg);
+    } else {
+      successMessages.push(
+        `Description meets minimum length requirement (${minLength} characters)`
+      );
+    }
   }
 }
 
@@ -196,13 +207,22 @@ function checkLabels(pullRequest: ContentObject): void {
   const labelNames = labels.map((l) => l.name);
 
   // Check if any of the required labels are present
-  enforceAnyLabels(labelNames);
+  const anyLabelsSuccess = enforceAnyLabels(labelNames);
+  if (anyLabelsSuccess) {
+    successMessages.push(anyLabelsSuccess);
+  }
 
   // Check if all of the required labels are present
-  enforceAllLabels(labelNames);
+  const allLabelsSuccess = enforceAllLabels(labelNames);
+  if (allLabelsSuccess) {
+    successMessages.push(allLabelsSuccess);
+  }
 
   // Check if any banned labels are present
-  enforceBannedLabels(labelNames);
+  const bannedLabelsSuccess = enforceBannedLabels(labelNames);
+  if (bannedLabelsSuccess) {
+    successMessages.push(bannedLabelsSuccess);
+  }
 }
 
 function checkIssueType(pullRequest: ContentObject): void {
@@ -227,15 +247,21 @@ function checkIssueType(pullRequest: ContentObject): void {
     const errorMsg =
       getCustomErrorMessage('invalid_issue_type') ||
       `Pull request must include one of these issue types: ${requiredIssueTypes.join(', ')}. Format should be "type: description" or "type(scope): description".`;
-    // Instead of failing immediately, collect the error
     errorMessages.push(errorMsg);
+  } else {
+    successMessages.push(
+      `Includes a valid issue type (${requiredIssueTypes.join(', ')})`
+    );
   }
 }
 
-function enforceAnyLabels(labels: string[]): void {
+function enforceAnyLabels(labels: string[]): string | void {
   const requiredLabelsAny = getInputArray('required_labels_any');
+  if (requiredLabelsAny.length === 0) {
+    return; // No requirements to check
+  }
+
   if (
-    requiredLabelsAny.length > 0 &&
     !requiredLabelsAny.some((requiredLabel) => labels.includes(requiredLabel))
   ) {
     const errorMsg =
@@ -245,13 +271,19 @@ function enforceAnyLabels(labels: string[]): void {
       )}`;
     // Instead of failing immediately, collect the error
     errorMessages.push(errorMsg);
+  } else {
+    // Return success message
+    return `Has at least one of the required labels: ${requiredLabelsAny.join(', ')}`;
   }
 }
 
-function enforceAllLabels(labels: string[]): void {
+function enforceAllLabels(labels: string[]): string | void {
   const requiredLabelsAll = getInputArray('required_labels_all');
+  if (requiredLabelsAll.length === 0) {
+    return; // No requirements to check
+  }
+
   if (
-    requiredLabelsAll.length > 0 &&
     !requiredLabelsAll.every((requiredLabel) => labels.includes(requiredLabel))
   ) {
     const missingLabels = requiredLabelsAll.filter(
@@ -262,43 +294,58 @@ function enforceAllLabels(labels: string[]): void {
       `The following required labels are missing from this pull request: ${missingLabels.join(', ')}`;
     // Instead of failing immediately, collect the error
     errorMessages.push(errorMsg);
+  } else {
+    // Return success message
+    return `Has all required labels: ${requiredLabelsAll.join(', ')}`;
   }
 }
 
-function enforceBannedLabels(labels: string[]): void {
+function enforceBannedLabels(labels: string[]): string | void {
   const bannedLabels = getInputArray('banned_labels');
+  if (bannedLabels.length === 0) {
+    return; // No requirements to check
+  }
+
   const bannedLabel = labels.find((label) => bannedLabels.includes(label));
-  if (bannedLabels.length > 0 && bannedLabel) {
+  if (bannedLabel) {
     const errorMsg =
       getCustomErrorMessage('banned_label') ||
       `The label "${bannedLabel}" is not allowed for this pull request.`;
     // Instead of failing immediately, collect the error
     errorMessages.push(errorMsg);
+  } else {
+    // Return success message
+    return `No banned labels detected`;
   }
 }
 
 function checkAssignees(pullRequest: ContentObject): void {
   const requireAssignee = core.getInput('require_assignee') === 'true';
-  if (
-    requireAssignee &&
-    (!pullRequest.assignees || pullRequest.assignees.length === 0)
-  ) {
-    const errorMsg =
-      getCustomErrorMessage('no_assignee') ||
-      'At least one assignee is required for this pull request.';
-    // Instead of failing immediately, collect the error
-    errorMessages.push(errorMsg);
+  if (requireAssignee) {
+    if (!pullRequest.assignees || pullRequest.assignees.length === 0) {
+      const errorMsg =
+        getCustomErrorMessage('no_assignee') ||
+        'At least one assignee is required for this pull request.';
+      errorMessages.push(errorMsg);
+    } else {
+      successMessages.push(
+        `Has at least one assignee: ${pullRequest.assignees.map((a) => a.login).join(', ')}`
+      );
+    }
   }
 }
 
 function checkDraft(pullRequest: ContentObject): void {
   const enforceDraft = core.getInput('enforce_draft') === 'true';
-  if (enforceDraft && pullRequest.draft) {
-    const errorMsg =
-      getCustomErrorMessage('is_draft') ||
-      'Draft pull requests are not allowed. Please mark as ready for review.';
-    // Instead of failing immediately, collect the error
-    errorMessages.push(errorMsg);
+  if (enforceDraft) {
+    if (pullRequest.draft) {
+      const errorMsg =
+        getCustomErrorMessage('is_draft') ||
+        'Draft pull requests are not allowed. Please mark as ready for review.';
+      errorMessages.push(errorMsg);
+    } else {
+      successMessages.push('Pull request is not in draft state');
+    }
   }
 }
 
