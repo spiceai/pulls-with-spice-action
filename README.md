@@ -1,6 +1,6 @@
 # Pulls with Spice Action
 
-A GitHub Action that enforces quality standards for pull requests with extra flavor.
+A GitHub Action that enforces standards for pull requests with extra flavor.
 
 ## Features
 
@@ -18,14 +18,14 @@ A GitHub Action that enforces quality standards for pull requests with extra fla
 Create a workflow file (e.g., `.github/workflows/pulls-with-spice.yml`) in your repository:
 
 ```yaml
-name: Enforce PR Quality
+name: Enforce PR With Spice
 
 on:
   pull_request:
     types: [opened, edited, labeled, unlabeled, assigned, unassigned]
 
 jobs:
-  enforce-quality:
+  enforce-pull-with-spice:
     runs-on: ubuntu-latest
     permissions:
       contents: read
