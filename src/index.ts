@@ -21,6 +21,8 @@ interface ContentObject {
   draft?: boolean;
 }
 
+const PR_COMMENT_TITLE = 'Pull with Spice';
+
 // Collect errors and success messages
 const errorMessages: string[] = [];
 const successMessages: string[] = [];
@@ -54,12 +56,12 @@ async function run(): Promise<void> {
     // If we have any errors, fail the action
     if (errorMessages.length > 0) {
       core.setFailed(
-        'Pull request quality checks failed. See PR comments for details.'
+        'Pull request checks failed. See PR comments for details.'
       );
       return;
     }
 
-    core.info('All pull request quality checks passed!');
+    core.info('All pull request checks passed!');
   } catch (error) {
     if (error instanceof Error) {
       core.setFailed(error.message);
@@ -98,8 +100,8 @@ async function postReportToPullRequest(
     // Format the comment message
     let statusHeader =
       errors.length > 0
-        ? `## 🔍 Pull Request Quality Check Failed\n\n`
-        : `## ✅ Pull Request Quality Check Passed\n\n`;
+        ? `## 🔍 ${PR_COMMENT_TITLE} Failed\n\n`
+        : `## ✅ ${PR_COMMENT_TITLE} Passed\n\n`;
 
     let statusBody = '';
 
@@ -135,10 +137,8 @@ async function postReportToPullRequest(
     });
 
     // Look for an existing comment from the action by checking the header pattern
-    const botComment = comments.data.find(
-      (comment) =>
-        comment.body?.startsWith('## 🔍 Pull Request Quality Check Failed') ||
-        comment.body?.startsWith('## ✅ Pull Request Quality Check Passed')
+    const botComment = comments.data.find((comment) =>
+      comment.body?.includes(PR_COMMENT_TITLE)
     );
 
     if (botComment) {
@@ -246,11 +246,11 @@ function checkIssueType(pullRequest: ContentObject): void {
   ) {
     const errorMsg =
       getCustomErrorMessage('invalid_issue_type') ||
-      `Pull request must include one of these issue types: ${requiredIssueTypes.join(', ')}. Format should be "type: description" or "type(scope): description".`;
+      `Pull request must include one of these issue types: ${formatListWithBackticks(requiredIssueTypes)}. Format should be "type: description" or "type(scope): description".`;
     errorMessages.push(errorMsg);
   } else {
     successMessages.push(
-      `Includes a valid issue type (${requiredIssueTypes.join(', ')})`
+      `Includes a valid issue type (${formatListWithBackticks(requiredIssueTypes)})`
     );
   }
 }
@@ -266,14 +266,10 @@ function enforceAnyLabels(labels: string[]): string | void {
   ) {
     const errorMsg =
       getCustomErrorMessage('missing_any_labels') ||
-      `Please select at least one of the required labels for this pull request: ${requiredLabelsAny.join(
-        ', '
-      )}`;
-    // Instead of failing immediately, collect the error
+      `Please select at least one of the required labels for this pull request: ${formatListWithBackticks(requiredLabelsAny)}`;
     errorMessages.push(errorMsg);
   } else {
-    // Return success message
-    return `Has at least one of the required labels: ${requiredLabelsAny.join(', ')}`;
+    return `Has at least one of the required labels: ${formatListWithBackticks(requiredLabelsAny)}`;
   }
 }
 
@@ -291,12 +287,10 @@ function enforceAllLabels(labels: string[]): string | void {
     );
     const errorMsg =
       getCustomErrorMessage('missing_all_labels') ||
-      `The following required labels are missing from this pull request: ${missingLabels.join(', ')}`;
-    // Instead of failing immediately, collect the error
+      `The following required labels are missing from this pull request: ${formatListWithBackticks(missingLabels)}`;
     errorMessages.push(errorMsg);
   } else {
-    // Return success message
-    return `Has all required labels: ${requiredLabelsAll.join(', ')}`;
+    return `Has all required labels: ${formatListWithBackticks(requiredLabelsAll)}`;
   }
 }
 
@@ -310,11 +304,9 @@ function enforceBannedLabels(labels: string[]): string | void {
   if (bannedLabel) {
     const errorMsg =
       getCustomErrorMessage('banned_label') ||
-      `The label "${bannedLabel}" is not allowed for this pull request.`;
-    // Instead of failing immediately, collect the error
+      `The label "${formatListWithBackticks([bannedLabel])}" is not allowed for this pull request.`;
     errorMessages.push(errorMsg);
   } else {
-    // Return success message
     return `No banned labels detected`;
   }
 }
@@ -329,7 +321,7 @@ function checkAssignees(pullRequest: ContentObject): void {
       errorMessages.push(errorMsg);
     } else {
       successMessages.push(
-        `Has at least one assignee: ${pullRequest.assignees.map((a) => a.login).join(', ')}`
+        `Has at least one assignee: ${formatListWithBackticks(pullRequest.assignees.map((a) => a.login))}`
       );
     }
   }
@@ -366,6 +358,10 @@ function getCustomErrorMessage(key: string): string | null {
     }
     return null;
   }
+}
+
+function formatListWithBackticks(items: string[]): string {
+  return `\`${items.join('`, `')}\``;
 }
 
 run();
