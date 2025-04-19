@@ -1,7 +1,7 @@
 {
     "name": "pulls-with-spice-action",
-    "version": "1.0.5",
-    "description": "GitHub Action to enforce quality standards for pull requests with extra spice",
+    "version": "1.0.6",
+    "description": "GitHub Action to enforce standards for pull requests with extra spice",
     "main": "dist/index.js",
     "scripts": {
         "build": "ncc build src/index.ts --license LICENSE -o dist",
