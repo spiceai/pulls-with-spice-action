@@ -13,12 +13,17 @@ interface User {
   login: string;
 }
 
+interface Milestone {
+  title: string;
+}
+
 interface ContentObject {
   title: string;
   body?: string;
   labels?: Label[];
   assignees?: User[];
   draft?: boolean;
+  milestone?: Milestone;
 }
 
 const PR_COMMENT_TITLE = 'Pull with Spice';
@@ -49,6 +54,7 @@ async function run(): Promise<void> {
     checkAssignees(pullRequest);
     checkIssueType(pullRequest);
     checkDraft(pullRequest);
+    checkMilestone(pullRequest);
 
     // Post the report to the PR with all messages (errors and success)
     await postReportToPullRequest(errorMessages, successMessages);
@@ -337,6 +343,20 @@ function checkDraft(pullRequest: ContentObject): void {
       errorMessages.push(errorMsg);
     } else {
       successMessages.push('Pull request is not in draft state');
+    }
+  }
+}
+
+function checkMilestone(pullRequest: ContentObject): void {
+  const requireMilestone = core.getInput('require_milestone') === 'true';
+  if (requireMilestone) {
+    if (!pullRequest.milestone) {
+      const errorMsg =
+        getCustomErrorMessage('no_milestone') ||
+        'Pull request must be associated with a milestone.';
+      errorMessages.push(errorMsg);
+    } else {
+      successMessages.push(`Has a milestone: ${pullRequest.milestone.title}`);
     }
   }
 }

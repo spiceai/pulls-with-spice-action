@@ -29975,6 +29975,7 @@ async function run() {
         checkAssignees(pullRequest);
         checkIssueType(pullRequest);
         checkDraft(pullRequest);
+        checkMilestone(pullRequest);
         // Post the report to the PR with all messages (errors and success)
         await postReportToPullRequest(errorMessages, successMessages);
         // If we have any errors, fail the action
@@ -30201,6 +30202,19 @@ function checkDraft(pullRequest) {
         }
         else {
             successMessages.push('Pull request is not in draft state');
+        }
+    }
+}
+function checkMilestone(pullRequest) {
+    const requireMilestone = core.getInput('require_milestone') === 'true';
+    if (requireMilestone) {
+        if (!pullRequest.milestone) {
+            const errorMsg = getCustomErrorMessage('no_milestone') ||
+                'Pull request must be associated with a milestone.';
+            errorMessages.push(errorMsg);
+        }
+        else {
+            successMessages.push(`Has a milestone: ${pullRequest.milestone.title}`);
         }
     }
 }
