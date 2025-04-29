@@ -12,6 +12,7 @@ A GitHub Action that enforces standards for pull requests with extra flavor.
 - Enforces issue type requirements in PR body or title
 - Posts error messages as comments on the pull request when checks fail
 - Customizable error messages
+- Enforces PRs specify a milestone
 
 ## Usage
 
@@ -42,6 +43,7 @@ jobs:
           require_assignee: 'true'
           required_issue_types: 'bug,enhancement,task'
           enforce_draft: 'false'
+          require_milestone: 'true'
           custom_error_messages: '{"title_too_short": "Please provide a more descriptive title."}'
 ```
 
@@ -58,6 +60,7 @@ jobs:
 | `require_assignee`               | Whether to require at least one assignee                           | No       | `false`               |
 | `enforce_draft`                  | Whether to enforce non-draft pull requests                         | No       | `false`               |
 | `required_issue_types`           | PR must include one of these issue types (comma-separated)         | No       | -                     |
+| `require_milestone`              | Whether to require a milestone on the PR                           | No       | `false`               |
 | `custom_error_messages`          | JSON object with custom error messages for various checks          | No       | -                     |
 
 ## Issue Type Enforcement
@@ -82,6 +85,7 @@ You can provide custom error messages using a JSON object. The following keys ar
 - `no_assignee` - Custom message for when an assignee is required but missing
 - `invalid_issue_type` - Custom message for when the required issue type is missing
 - `is_draft` - Custom message for when a draft PR is not allowed
+- `no_milestone` - Custom message for when a milestone is required but missing
 
 ## Development
 

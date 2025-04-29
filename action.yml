@@ -31,6 +31,10 @@ inputs:
   required_issue_types:
     description: 'Pull request must include one of these issue types in conventional commit format (comma-separated)'
     required: false
+  require_milestone:
+    description: 'Whether to require a milestone on the pull request'
+    required: false
+    default: 'false'
   custom_error_messages:
     description: 'JSON object with custom error messages for various checks'
     required: false
