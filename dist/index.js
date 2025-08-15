@@ -30008,6 +30008,11 @@ async function postReportToPullRequest(errors, successes) {
             core.warning('Could not find pull request number in context. Unable to post comments.');
             return;
         }
+        const commentWithNoErrors = core.getInput('comment_with_no_errors') === 'true';
+        if (!commentWithNoErrors && errors.length == 0) {
+            core.info('No errors found. No need to post a comment.');
+            return;
+        }
         const prNumber = context.payload.pull_request.number;
         // Format the comment message
         let statusHeader = errors.length > 0
@@ -30071,6 +30076,18 @@ async function postReportToPullRequest(errors, successes) {
     }
 }
 function checkTitle(pullRequest) {
+    const checkConventionalCommitTitle = core.getInput('require_conventional_commit_title') === 'true';
+    if (checkConventionalCommitTitle) {
+        const conventionalCommitPattern = /^(feat|fix|docs|style|refactor|perf|test|chore|release)(\([a-z-]+\))?: .+/;
+        if (!conventionalCommitPattern.test(pullRequest.title)) {
+            const errorMsg = getCustomErrorMessage('invalid_title_format') ||
+                'Pull request title must follow the conventional commit format: "type(scope): description".';
+            errorMessages.push(errorMsg);
+        }
+        else {
+            successMessages.push('Title follows conventional commit format');
+        }
+    }
     const minLength = parseInt(core.getInput('require_title_min_length'), 10);
     if (minLength) {
         if (pullRequest.title.length < minLength) {
