@@ -45,23 +45,27 @@ jobs:
           enforce_draft: 'false'
           require_milestone: 'true'
           custom_error_messages: '{"title_too_short": "Please provide a more descriptive title."}'
+          comment_with_no_errors: 'true'
+          require_conventional_commit_title: 'false'
 ```
 
 ## Inputs
 
-| Input                            | Description                                                        | Required | Default               |
-| -------------------------------- | ------------------------------------------------------------------ | -------- | --------------------- |
-| `github_token`                   | GitHub token for posting comments to PR thread                     | No       | `${{ github.token }}` |
-| `require_description_min_length` | Minimum length of the PR description                               | No       | `0`                   |
-| `require_title_min_length`       | Minimum length of the PR title                                     | No       | `10`                  |
-| `required_labels_any`            | Any of these labels must be present on the PR (comma-separated)    | No       | -                     |
-| `required_labels_all`            | All of these labels must be present on the PR (comma-separated)    | No       | -                     |
-| `banned_labels`                  | None of these labels should be present on the PR (comma-separated) | No       | -                     |
-| `require_assignee`               | Whether to require at least one assignee                           | No       | `false`               |
-| `enforce_draft`                  | Whether to enforce non-draft pull requests                         | No       | `false`               |
-| `required_issue_types`           | PR must include one of these issue types (comma-separated)         | No       | -                     |
-| `require_milestone`              | Whether to require a milestone on the PR                           | No       | `false`               |
-| `custom_error_messages`          | JSON object with custom error messages for various checks          | No       | -                     |
+| Input                               | Description                                                        | Required | Default               |
+| ----------------------------------- | ------------------------------------------------------------------ | -------- | --------------------- |
+| `github_token`                      | GitHub token for posting comments to PR thread                     | No       | `${{ github.token }}` |
+| `require_description_min_length`    | Minimum length of the PR description                               | No       | `0`                   |
+| `require_title_min_length`          | Minimum length of the PR title                                     | No       | `10`                  |
+| `required_labels_any`               | Any of these labels must be present on the PR (comma-separated)    | No       | -                     |
+| `required_labels_all`               | All of these labels must be present on the PR (comma-separated)    | No       | -                     |
+| `banned_labels`                     | None of these labels should be present on the PR (comma-separated) | No       | -                     |
+| `require_assignee`                  | Whether to require at least one assignee                           | No       | `false`               |
+| `enforce_draft`                     | Whether to enforce non-draft pull requests                         | No       | `false`               |
+| `required_issue_types`              | PR must include one of these issue types (comma-separated)         | No       | -                     |
+| `require_milestone`                 | Whether to require a milestone on the PR                           | No       | `false`               |
+| `custom_error_messages`             | JSON object with custom error messages for various checks          | No       | -                     |
+| `comment_with_no_errors`            | Whether to post a comment on the PR when there are no errors       | No       | `true`                |
+| `require_conventional_commit_title` | Whether to validate the PR title starts like a conventional commit | No       | `false`               |
 
 ## Issue Type Enforcement
 

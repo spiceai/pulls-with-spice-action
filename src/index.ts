@@ -101,6 +101,12 @@ async function postReportToPullRequest(
       return;
     }
 
+    const commentWithNoErrors = core.getInput('comment_with_no_errors') === 'true';
+    if (!commentWithNoErrors && errors.length == 0) {
+      core.info('No errors found. No need to post a comment.');
+      return;
+    }
+
     const prNumber = context.payload.pull_request.number;
 
     // Format the comment message
@@ -174,6 +180,19 @@ async function postReportToPullRequest(
 }
 
 function checkTitle(pullRequest: ContentObject): void {
+  const checkConventionalCommitTitle = core.getInput('require_conventional_commit_title') === 'true';
+  if (checkConventionalCommitTitle) {
+    const conventionalCommitPattern = /^(feat|fix|docs|style|refactor|perf|test|chore|release)(\([a-z-]+\))?: .+/;
+    if (!conventionalCommitPattern.test(pullRequest.title)) {
+      const errorMsg =
+        getCustomErrorMessage('invalid_title_format') ||
+        'Pull request title must follow the conventional commit format: "type(scope): description".';
+      errorMessages.push(errorMsg);
+    } else {
+      successMessages.push('Title follows conventional commit format');
+    }
+  }
+
   const minLength = parseInt(core.getInput('require_title_min_length'), 10);
   if (minLength) {
     if (pullRequest.title.length < minLength) {

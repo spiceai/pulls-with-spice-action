@@ -42,6 +42,14 @@ inputs:
     description: 'GitHub token for posting comments to PR thread'
     required: false
     default: '${{ github.token }}'
+  comment_with_no_errors:
+    description: 'Whether to post a comment when no errors are found'
+    required: false
+    default: 'true'
+  require_conventional_commit_title:
+    description: 'Whether to require the pull request title to follow conventional commit format'
+    required: false
+    default: 'false'
 
 runs:
   using: 'node20'
