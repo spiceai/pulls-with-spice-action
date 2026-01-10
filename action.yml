@@ -17,6 +17,9 @@ inputs:
   required_labels_all:
     description: 'All of these labels must be present on the pull request (comma-separated)'
     required: false
+  required_label_prefixes:
+    description: 'Require at least one label from each prefix category (comma-separated, e.g., kind/,area/)'
+    required: false
   banned_labels:
     description: 'None of these labels should be present on the pull request (comma-separated)'
     required: false
@@ -35,6 +38,32 @@ inputs:
     description: 'Whether to require a milestone on the pull request'
     required: false
     default: 'false'
+  branch_name_pattern:
+    description: 'Regex pattern that branch names must match'
+    required: false
+  auto_label:
+    description: 'Enable automatic labeling based on file paths and conventional commits'
+    required: false
+    default: 'false'
+  auto_label_size:
+    description: 'Automatically add size labels (size/xs, size/s, size/m, size/l, size/xl) based on changes'
+    required: false
+    default: 'false'
+  auto_label_type:
+    description: 'Automatically add type labels based on conventional commit prefixes in title'
+    required: false
+    default: 'false'
+  auto_assign:
+    description: 'Enable automatic assignment of PRs'
+    required: false
+    default: 'false'
+  auto_assign_author:
+    description: 'Automatically assign the PR author as an assignee'
+    required: false
+    default: 'false'
+  auto_assign_users:
+    description: 'Comma-separated list of users to automatically assign to PRs'
+    required: false
   custom_error_messages:
     description: 'JSON object with custom error messages for various checks'
     required: false
@@ -44,7 +73,7 @@ inputs:
     default: '${{ github.token }}'
 
 runs:
-  using: 'node20'
+  using: 'node22'
   main: 'dist/index.js'
 
 branding:
