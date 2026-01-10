@@ -15,6 +15,7 @@ interface User {
 
 interface Milestone {
   title: string;
+  number: number;
 }
 
 interface ContentObject {
@@ -24,13 +25,47 @@ interface ContentObject {
   assignees?: User[];
   draft?: boolean;
   milestone?: Milestone;
+  number?: number;
+  user?: User;
+  head?: { ref: string };
+  base?: { ref: string };
+}
+
+interface AutoLabelRule {
+  label: string;
+  paths: string[];
+}
+
+interface ChangedFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
 }
 
 const PR_COMMENT_TITLE = 'Pull with Spice';
 
+// Security: Maximum lengths to prevent DoS via extremely long inputs
+const MAX_TITLE_LENGTH = 500;
+const MAX_BODY_LENGTH = 65536;
+const MAX_LABEL_NAME_LENGTH = 100;
+const MAX_LABELS_COUNT = 100;
+const MAX_CHANGED_FILES = 3000;
 // Collect errors and success messages
 const errorMessages: string[] = [];
 const successMessages: string[] = [];
+const autoAppliedLabels: string[] = [];
+const suggestedFixes: string[] = [];
+
+// ============================================================================
+// Input Validation Functions
+// ============================================================================
+
+function sanitizeString(input: string | undefined, maxLength: number): string {
+  if (!input) return '';
+  return input.slice(0, maxLength);
+}
 
 async function run(): Promise<void> {
   try {
@@ -47,14 +82,64 @@ async function run(): Promise<void> {
       return;
     }
 
+    // Sanitize inputs to prevent potential issues with extremely long content
+    pullRequest.title = sanitizeString(pullRequest.title, MAX_TITLE_LENGTH);
+    pullRequest.body = sanitizeString(pullRequest.body, MAX_BODY_LENGTH);
+
+    // Limit labels to prevent abuse
+    if (pullRequest.labels && pullRequest.labels.length > MAX_LABELS_COUNT) {
+      pullRequest.labels = pullRequest.labels.slice(0, MAX_LABELS_COUNT);
+    }
+
+    const token = core.getInput('github_token');
+    const octokit = token ? github.getOctokit(token) : null;
+
+    // Determine which features need file data (optimization: only fetch if needed)
+    const autoLabelEnabled = core.getInput('auto_label') === 'true';
+    const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
+
+    // Get changed files for auto-labeling (if enabled)
+    let changedFiles: ChangedFile[] = [];
+    if (
+      octokit &&
+      pullRequest.number &&
+      (autoLabelEnabled || autoLabelSizeEnabled)
+    ) {
+      changedFiles = await getChangedFiles(octokit, pullRequest.number);
+    }
+
+    // Auto-labeling (runs before validation)
+    if (octokit && pullRequest.number) {
+      await performAutoLabeling(octokit, pullRequest, changedFiles);
+    }
+
+    // Auto-assign (if enabled)
+    if (octokit && pullRequest.number) {
+      await performAutoAssign(octokit, pullRequest);
+    }
+
+    // Refresh labels after auto-labeling (only if we made changes)
+    const needsRefresh =
+      autoAppliedLabels.length > 0 || core.getInput('auto_assign') === 'true';
+    if (octokit && pullRequest.number && needsRefresh) {
+      const freshPR = await octokit.rest.pulls.get({
+        ...github.context.repo,
+        pull_number: pullRequest.number,
+      });
+      pullRequest.labels = freshPR.data.labels as Label[];
+      pullRequest.assignees = freshPR.data.assignees as User[];
+    }
+
     // Run all the quality checks
     checkTitle(pullRequest);
     checkDescription(pullRequest);
     checkLabels(pullRequest);
+    checkLabelCategories(pullRequest);
     checkAssignees(pullRequest);
     checkIssueType(pullRequest);
     checkDraft(pullRequest);
     checkMilestone(pullRequest);
+    checkBranchNaming(pullRequest);
 
     // Post the report to the PR with all messages (errors and success)
     await postReportToPullRequest(errorMessages, successMessages);
@@ -104,12 +189,21 @@ async function postReportToPullRequest(
     const prNumber = context.payload.pull_request.number;
 
     // Format the comment message
-    let statusHeader =
+    const statusHeader =
       errors.length > 0
         ? `## 🔍 ${PR_COMMENT_TITLE} Failed\n\n`
         : `## ✅ ${PR_COMMENT_TITLE} Passed\n\n`;
 
     let statusBody = '';
+
+    // Add auto-applied labels section
+    if (autoAppliedLabels.length > 0) {
+      statusBody += `### 🏷️ Auto-applied labels:\n\n`;
+      autoAppliedLabels.forEach((label) => {
+        statusBody += `- \`${label}\`\n`;
+      });
+      statusBody += `\n`;
+    }
 
     // Add success messages first
     if (successes.length > 0) {
@@ -125,6 +219,15 @@ async function postReportToPullRequest(
       statusBody += `### Failed checks:\n\n`;
       errors.forEach((error) => {
         statusBody += `- ❌ ${error}\n`;
+      });
+      statusBody += `\n`;
+    }
+
+    // Add suggested fixes if available
+    if (suggestedFixes.length > 0) {
+      statusBody += `### 💡 Suggested fixes:\n\n`;
+      suggestedFixes.forEach((fix) => {
+        statusBody += `- ${fix}\n`;
       });
       statusBody += `\n`;
     }
@@ -382,6 +485,285 @@ function getCustomErrorMessage(key: string): string | null {
 
 function formatListWithBackticks(items: string[]): string {
   return `\`${items.join('`, `')}\``;
+}
+
+// ============================================================================
+// Auto-labeling Functions
+// ============================================================================
+
+async function getChangedFiles(
+  octokit: ReturnType<typeof github.getOctokit>,
+  prNumber: number
+): Promise<ChangedFile[]> {
+  try {
+    const files: ChangedFile[] = [];
+    let page = 1;
+
+    // Paginate through all files with safety limit
+    while (files.length < MAX_CHANGED_FILES) {
+      const response = await octokit.rest.pulls.listFiles({
+        ...github.context.repo,
+        pull_number: prNumber,
+        per_page: 100,
+        page: page,
+      });
+
+      if (response.data.length === 0) break;
+
+      files.push(...(response.data as ChangedFile[]));
+      if (response.data.length < 100) break;
+      page++;
+    }
+
+    return files.slice(0, MAX_CHANGED_FILES);
+  } catch (error) {
+    core.warning(`Failed to get changed files: ${error}`);
+    return [];
+  }
+}
+
+async function performAutoLabeling(
+  octokit: ReturnType<typeof github.getOctokit>,
+  pullRequest: ContentObject,
+  changedFiles: ChangedFile[]
+): Promise<void> {
+  const autoLabelEnabled = core.getInput('auto_label') === 'true';
+  const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
+  const autoLabelTypeEnabled = core.getInput('auto_label_type') === 'true';
+
+  if (!autoLabelEnabled && !autoLabelSizeEnabled && !autoLabelTypeEnabled) {
+    return;
+  }
+
+  const labelsToAdd: Set<string> = new Set();
+  const currentLabels = (pullRequest.labels || []).map((l) => l.name);
+
+  // Built-in rules based on file paths (only if auto_label is enabled)
+  const builtInRules: AutoLabelRule[] = autoLabelEnabled
+    ? [
+        {
+          label: 'area/docs',
+          paths: ['docs/', 'README', '.md', 'CONTRIBUTING', 'LICENSE'],
+        },
+        {
+          label: 'area/ci',
+          paths: ['.github/', 'Jenkinsfile', '.travis', '.circleci'],
+        },
+        {
+          label: 'area/tests',
+          paths: ['test/', 'tests/', '__tests__/', 'spec/', '.test.', '.spec.'],
+        },
+        {
+          label: 'area/config',
+          paths: ['.json', '.yaml', '.yml', '.toml', '.ini', '.env'],
+        },
+        {
+          label: 'kind/dependencies',
+          paths: [
+            'package-lock.json',
+            'yarn.lock',
+            'go.sum',
+            'Cargo.lock',
+            'requirements.txt',
+            'Gemfile.lock',
+          ],
+        },
+      ]
+    : [];
+
+  // Apply path-based rules
+  for (const rule of builtInRules) {
+    for (const file of changedFiles) {
+      if (rule.paths.some((path) => file.filename.includes(path))) {
+        labelsToAdd.add(sanitizeString(rule.label, MAX_LABEL_NAME_LENGTH));
+        break;
+      }
+    }
+  }
+
+  // Size-based labeling
+  if (autoLabelSizeEnabled && changedFiles.length > 0) {
+    const totalChanges = changedFiles.reduce(
+      (sum, file) => sum + file.additions + file.deletions,
+      0
+    );
+    const sizeLabel = getSizeLabel(totalChanges);
+    if (sizeLabel) {
+      // Remove any existing size labels from our set
+      const sizeLabels = ['size/xs', 'size/s', 'size/m', 'size/l', 'size/xl'];
+      for (const sl of sizeLabels) {
+        labelsToAdd.delete(sl);
+      }
+      labelsToAdd.add(sizeLabel);
+    }
+  }
+
+  // Conventional commit type-based labeling
+  if (autoLabelTypeEnabled) {
+    const typeLabel = getTypeLabelFromTitle(pullRequest.title);
+    if (typeLabel) {
+      labelsToAdd.add(typeLabel);
+    }
+  }
+
+  // Filter out labels that already exist
+  const newLabels = Array.from(labelsToAdd).filter(
+    (label) => !currentLabels.includes(label)
+  );
+
+  if (newLabels.length > 0 && pullRequest.number) {
+    try {
+      await octokit.rest.issues.addLabels({
+        ...github.context.repo,
+        issue_number: pullRequest.number,
+        labels: newLabels,
+      });
+      autoAppliedLabels.push(...newLabels);
+      core.info(`Auto-applied labels: ${newLabels.join(', ')}`);
+    } catch (error) {
+      core.warning(`Failed to apply labels: ${error}`);
+    }
+  }
+}
+
+function getSizeLabel(totalChanges: number): string {
+  if (totalChanges <= 10) return 'size/xs';
+  if (totalChanges <= 50) return 'size/s';
+  if (totalChanges <= 200) return 'size/m';
+  if (totalChanges <= 500) return 'size/l';
+  return 'size/xl';
+}
+
+function getTypeLabelFromTitle(title: string): string | null {
+  const conventionalCommitRegex = /^(\w+)(?:\([^)]+\))?!?:/;
+  const match = title.match(conventionalCommitRegex);
+  if (match && match[1]) {
+    const type = match[1].toLowerCase();
+    const typeToLabel: Record<string, string> = {
+      feat: 'kind/feature',
+      fix: 'kind/bug',
+      docs: 'kind/docs',
+      style: 'kind/style',
+      refactor: 'kind/refactor',
+      perf: 'kind/performance',
+      test: 'kind/test',
+      build: 'kind/build',
+      ci: 'kind/ci',
+      chore: 'kind/chore',
+      revert: 'kind/revert',
+      security: 'kind/security',
+      deps: 'kind/dependencies',
+    };
+    return typeToLabel[type] ?? null;
+  }
+  return null;
+}
+
+// ============================================================================
+// Auto-assign Functions
+// ============================================================================
+
+async function performAutoAssign(
+  octokit: ReturnType<typeof github.getOctokit>,
+  pullRequest: ContentObject
+): Promise<void> {
+  const autoAssignEnabled = core.getInput('auto_assign') === 'true';
+  if (!autoAssignEnabled || !pullRequest.number) {
+    return;
+  }
+
+  // Check if already has assignees
+  if (pullRequest.assignees && pullRequest.assignees.length > 0) {
+    return;
+  }
+
+  const autoAssignees = getInputArray('auto_assign_users');
+  const assignAuthor = core.getInput('auto_assign_author') === 'true';
+
+  const assigneesToAdd: string[] = [];
+
+  // Assign the PR author
+  if (assignAuthor && pullRequest.user?.login) {
+    assigneesToAdd.push(pullRequest.user.login);
+  }
+
+  // Add configured auto-assignees
+  assigneesToAdd.push(...autoAssignees);
+
+  if (assigneesToAdd.length > 0) {
+    try {
+      await octokit.rest.issues.addAssignees({
+        ...github.context.repo,
+        issue_number: pullRequest.number,
+        assignees: [...new Set(assigneesToAdd)],
+      });
+      core.info(`Auto-assigned: ${assigneesToAdd.join(', ')}`);
+      successMessages.push(
+        `Auto-assigned: ${formatListWithBackticks(assigneesToAdd)}`
+      );
+    } catch (error) {
+      core.warning(`Failed to auto-assign: ${error}`);
+    }
+  }
+}
+
+// ============================================================================
+// Label Category Functions
+// ============================================================================
+
+function checkLabelCategories(pullRequest: ContentObject): void {
+  const requiredPrefixes = getInputArray('required_label_prefixes');
+  if (requiredPrefixes.length === 0) {
+    return;
+  }
+
+  const labels = (pullRequest.labels || []).map((l) => l.name);
+
+  for (const prefixInput of requiredPrefixes) {
+    const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
+    const hasLabelFromCategory = labels.some((label) =>
+      label.startsWith(prefix)
+    );
+
+    if (!hasLabelFromCategory) {
+      const errorMsg =
+        getCustomErrorMessage(
+          `missing_category_${prefixInput.replace('/', '')}`
+        ) || `Missing required label from category \`${prefix}\`.`;
+      errorMessages.push(errorMsg);
+      suggestedFixes.push(
+        `Add a label with prefix \`${prefix}\` (e.g., ${prefix}example)`
+      );
+    } else {
+      successMessages.push(`Has a label from required category \`${prefix}\``);
+    }
+  }
+}
+
+// ============================================================================
+// Branch Naming Check
+// ============================================================================
+
+function checkBranchNaming(pullRequest: ContentObject): void {
+  const branchPattern = core.getInput('branch_name_pattern');
+  if (!branchPattern || !pullRequest.head?.ref) {
+    return;
+  }
+
+  const branchName = pullRequest.head.ref;
+  const regex = new RegExp(branchPattern);
+
+  if (!regex.test(branchName)) {
+    const errorMsg =
+      getCustomErrorMessage('invalid_branch_name') ||
+      `Branch name \`${branchName}\` does not match required pattern: \`${branchPattern}\``;
+    errorMessages.push(errorMsg);
+    suggestedFixes.push(
+      `Rename your branch to match the pattern: \`${branchPattern}\``
+    );
+  } else {
+    successMessages.push(`Branch name matches required pattern`);
+  }
 }
 
 run();
