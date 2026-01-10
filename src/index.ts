@@ -85,7 +85,7 @@ async function run(): Promise<void> {
     // Sanitize inputs to prevent potential issues with extremely long content
     pullRequest.title = sanitizeString(pullRequest.title, MAX_TITLE_LENGTH);
     pullRequest.body = sanitizeString(pullRequest.body, MAX_BODY_LENGTH);
-    
+
     // Limit labels to prevent abuse
     if (pullRequest.labels && pullRequest.labels.length > MAX_LABELS_COUNT) {
       pullRequest.labels = pullRequest.labels.slice(0, MAX_LABELS_COUNT);
@@ -97,10 +97,14 @@ async function run(): Promise<void> {
     // Determine which features need file data (optimization: only fetch if needed)
     const autoLabelEnabled = core.getInput('auto_label') === 'true';
     const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
-    
+
     // Get changed files for auto-labeling (if enabled)
     let changedFiles: ChangedFile[] = [];
-    if (octokit && pullRequest.number && (autoLabelEnabled || autoLabelSizeEnabled)) {
+    if (
+      octokit &&
+      pullRequest.number &&
+      (autoLabelEnabled || autoLabelSizeEnabled)
+    ) {
       changedFiles = await getChangedFiles(octokit, pullRequest.number);
     }
 
@@ -115,8 +119,8 @@ async function run(): Promise<void> {
     }
 
     // Refresh labels after auto-labeling (only if we made changes)
-    const needsRefresh = autoAppliedLabels.length > 0 || 
-                         core.getInput('auto_assign') === 'true';
+    const needsRefresh =
+      autoAppliedLabels.length > 0 || core.getInput('auto_assign') === 'true';
     if (octokit && pullRequest.number && needsRefresh) {
       const freshPR = await octokit.rest.pulls.get({
         ...github.context.repo,
@@ -494,7 +498,7 @@ async function getChangedFiles(
   try {
     const files: ChangedFile[] = [];
     let page = 1;
-    
+
     // Paginate through all files with safety limit
     while (files.length < MAX_CHANGED_FILES) {
       const response = await octokit.rest.pulls.listFiles({
@@ -503,14 +507,14 @@ async function getChangedFiles(
         per_page: 100,
         page: page,
       });
-      
+
       if (response.data.length === 0) break;
-      
+
       files.push(...(response.data as ChangedFile[]));
       if (response.data.length < 100) break;
       page++;
     }
-    
+
     return files.slice(0, MAX_CHANGED_FILES);
   } catch (error) {
     core.warning(`Failed to get changed files: ${error}`);
@@ -526,7 +530,7 @@ async function performAutoLabeling(
   const autoLabelEnabled = core.getInput('auto_label') === 'true';
   const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
   const autoLabelTypeEnabled = core.getInput('auto_label_type') === 'true';
-  
+
   if (!autoLabelEnabled && !autoLabelSizeEnabled && !autoLabelTypeEnabled) {
     return;
   }
@@ -535,13 +539,37 @@ async function performAutoLabeling(
   const currentLabels = (pullRequest.labels || []).map((l) => l.name);
 
   // Built-in rules based on file paths (only if auto_label is enabled)
-  const builtInRules: AutoLabelRule[] = autoLabelEnabled ? [
-    { label: 'area/docs', paths: ['docs/', 'README', '.md', 'CONTRIBUTING', 'LICENSE'] },
-    { label: 'area/ci', paths: ['.github/', 'Jenkinsfile', '.travis', '.circleci'] },
-    { label: 'area/tests', paths: ['test/', 'tests/', '__tests__/', 'spec/', '.test.', '.spec.'] },
-    { label: 'area/config', paths: ['.json', '.yaml', '.yml', '.toml', '.ini', '.env'] },
-    { label: 'kind/dependencies', paths: ['package-lock.json', 'yarn.lock', 'go.sum', 'Cargo.lock', 'requirements.txt', 'Gemfile.lock'] },
-  ] : [];
+  const builtInRules: AutoLabelRule[] = autoLabelEnabled
+    ? [
+        {
+          label: 'area/docs',
+          paths: ['docs/', 'README', '.md', 'CONTRIBUTING', 'LICENSE'],
+        },
+        {
+          label: 'area/ci',
+          paths: ['.github/', 'Jenkinsfile', '.travis', '.circleci'],
+        },
+        {
+          label: 'area/tests',
+          paths: ['test/', 'tests/', '__tests__/', 'spec/', '.test.', '.spec.'],
+        },
+        {
+          label: 'area/config',
+          paths: ['.json', '.yaml', '.yml', '.toml', '.ini', '.env'],
+        },
+        {
+          label: 'kind/dependencies',
+          paths: [
+            'package-lock.json',
+            'yarn.lock',
+            'go.sum',
+            'Cargo.lock',
+            'requirements.txt',
+            'Gemfile.lock',
+          ],
+        },
+      ]
+    : [];
 
   // Apply path-based rules
   for (const rule of builtInRules) {
@@ -670,7 +698,9 @@ async function performAutoAssign(
         assignees: [...new Set(assigneesToAdd)],
       });
       core.info(`Auto-assigned: ${assigneesToAdd.join(', ')}`);
-      successMessages.push(`Auto-assigned: ${formatListWithBackticks(assigneesToAdd)}`);
+      successMessages.push(
+        `Auto-assigned: ${formatListWithBackticks(assigneesToAdd)}`
+      );
     } catch (error) {
       core.warning(`Failed to auto-assign: ${error}`);
     }
@@ -691,14 +721,19 @@ function checkLabelCategories(pullRequest: ContentObject): void {
 
   for (const prefixInput of requiredPrefixes) {
     const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
-    const hasLabelFromCategory = labels.some((label) => label.startsWith(prefix));
+    const hasLabelFromCategory = labels.some((label) =>
+      label.startsWith(prefix)
+    );
 
     if (!hasLabelFromCategory) {
       const errorMsg =
-        getCustomErrorMessage(`missing_category_${prefixInput.replace('/', '')}`) ||
-        `Missing required label from category \`${prefix}\`.`;
+        getCustomErrorMessage(
+          `missing_category_${prefixInput.replace('/', '')}`
+        ) || `Missing required label from category \`${prefix}\`.`;
       errorMessages.push(errorMsg);
-      suggestedFixes.push(`Add a label with prefix \`${prefix}\` (e.g., ${prefix}example)`);
+      suggestedFixes.push(
+        `Add a label with prefix \`${prefix}\` (e.g., ${prefix}example)`
+      );
     } else {
       successMessages.push(`Has a label from required category \`${prefix}\``);
     }
@@ -723,7 +758,9 @@ function checkBranchNaming(pullRequest: ContentObject): void {
       getCustomErrorMessage('invalid_branch_name') ||
       `Branch name \`${branchName}\` does not match required pattern: \`${branchPattern}\``;
     errorMessages.push(errorMsg);
-    suggestedFixes.push(`Rename your branch to match the pattern: \`${branchPattern}\``);
+    suggestedFixes.push(
+      `Rename your branch to match the pattern: \`${branchPattern}\``
+    );
   } else {
     successMessages.push(`Branch name matches required pattern`);
   }
