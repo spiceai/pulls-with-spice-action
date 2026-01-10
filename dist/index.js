@@ -30280,7 +30280,9 @@ async function run() {
         const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
         // Get changed files for auto-labeling (if enabled)
         let changedFiles = [];
-        if (octokit && pullRequest.number && (autoLabelEnabled || autoLabelSizeEnabled)) {
+        if (octokit &&
+            pullRequest.number &&
+            (autoLabelEnabled || autoLabelSizeEnabled)) {
             changedFiles = await getChangedFiles(octokit, pullRequest.number);
         }
         // Auto-labeling (runs before validation)
@@ -30292,8 +30294,7 @@ async function run() {
             await performAutoAssign(octokit, pullRequest);
         }
         // Refresh labels after auto-labeling (only if we made changes)
-        const needsRefresh = autoAppliedLabels.length > 0 ||
-            core.getInput('auto_assign') === 'true';
+        const needsRefresh = autoAppliedLabels.length > 0 || core.getInput('auto_assign') === 'true';
         if (octokit && pullRequest.number && needsRefresh) {
             const freshPR = await octokit.rest.pulls.get({
                 ...github.context.repo,
@@ -30628,13 +30629,37 @@ async function performAutoLabeling(octokit, pullRequest, changedFiles) {
     const labelsToAdd = new Set();
     const currentLabels = (pullRequest.labels || []).map((l) => l.name);
     // Built-in rules based on file paths (only if auto_label is enabled)
-    const builtInRules = autoLabelEnabled ? [
-        { label: 'area/docs', paths: ['docs/', 'README', '.md', 'CONTRIBUTING', 'LICENSE'] },
-        { label: 'area/ci', paths: ['.github/', 'Jenkinsfile', '.travis', '.circleci'] },
-        { label: 'area/tests', paths: ['test/', 'tests/', '__tests__/', 'spec/', '.test.', '.spec.'] },
-        { label: 'area/config', paths: ['.json', '.yaml', '.yml', '.toml', '.ini', '.env'] },
-        { label: 'kind/dependencies', paths: ['package-lock.json', 'yarn.lock', 'go.sum', 'Cargo.lock', 'requirements.txt', 'Gemfile.lock'] },
-    ] : [];
+    const builtInRules = autoLabelEnabled
+        ? [
+            {
+                label: 'area/docs',
+                paths: ['docs/', 'README', '.md', 'CONTRIBUTING', 'LICENSE'],
+            },
+            {
+                label: 'area/ci',
+                paths: ['.github/', 'Jenkinsfile', '.travis', '.circleci'],
+            },
+            {
+                label: 'area/tests',
+                paths: ['test/', 'tests/', '__tests__/', 'spec/', '.test.', '.spec.'],
+            },
+            {
+                label: 'area/config',
+                paths: ['.json', '.yaml', '.yml', '.toml', '.ini', '.env'],
+            },
+            {
+                label: 'kind/dependencies',
+                paths: [
+                    'package-lock.json',
+                    'yarn.lock',
+                    'go.sum',
+                    'Cargo.lock',
+                    'requirements.txt',
+                    'Gemfile.lock',
+                ],
+            },
+        ]
+        : [];
     // Apply path-based rules
     for (const rule of builtInRules) {
         for (const file of changedFiles) {
@@ -30765,8 +30790,7 @@ function checkLabelCategories(pullRequest) {
         const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
         const hasLabelFromCategory = labels.some((label) => label.startsWith(prefix));
         if (!hasLabelFromCategory) {
-            const errorMsg = getCustomErrorMessage(`missing_category_${prefixInput.replace('/', '')}`) ||
-                `Missing required label from category \`${prefix}\`.`;
+            const errorMsg = getCustomErrorMessage(`missing_category_${prefixInput.replace('/', '')}`) || `Missing required label from category \`${prefix}\`.`;
             errorMessages.push(errorMsg);
             suggestedFixes.push(`Add a label with prefix \`${prefix}\` (e.g., ${prefix}example)`);
         }
