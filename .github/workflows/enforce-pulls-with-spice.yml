@@ -11,13 +11,13 @@ jobs:
   enforce-pull-with-spice:
     runs-on: spiceai-macos
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         if: github.event_name == 'pull_request'
       - uses: ./
         if: github.event_name == 'pull_request'
         with:
           require_title_min_length: '5'
-          required_labels_any: 'bug,enhancement,documentation,dependencies'
+          required_label_prefixes: 'kind/'
           banned_labels: 'invalid,wontfix,nomerge,duplicate'
           require_assignee: 'true'
           auto_label: 'true'
