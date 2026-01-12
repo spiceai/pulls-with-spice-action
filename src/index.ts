@@ -1,5 +1,8 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { generateText, Output } from 'ai';
+import { z } from 'zod';
 
 interface CustomErrorMessages {
   [key: string]: string;
@@ -44,6 +47,18 @@ interface ChangedFile {
   patch?: string;
 }
 
+// Schema for AI label analysis response using structured outputs
+const AILabelAnalysisSchema = z.object({
+  labels: z
+    .array(z.string())
+    .describe('Array of suggested label names from the available labels list'),
+  reasoning: z
+    .string()
+    .describe('Brief explanation of why these labels were chosen'),
+});
+
+type AILabelAnalysis = z.infer<typeof AILabelAnalysisSchema>;
+
 const PR_COMMENT_TITLE = 'Pull with Spice';
 
 // Security: Maximum lengths to prevent DoS via extremely long inputs
@@ -57,6 +72,7 @@ const errorMessages: string[] = [];
 const successMessages: string[] = [];
 const autoAppliedLabels: string[] = [];
 const suggestedFixes: string[] = [];
+const aiAnalysisResults: string[] = [];
 
 // ============================================================================
 // Input Validation Functions
@@ -111,6 +127,18 @@ async function run(): Promise<void> {
     // Auto-labeling (runs before validation)
     if (octokit && pullRequest.number) {
       await performAutoLabeling(octokit, pullRequest, changedFiles);
+    }
+
+    // AI-powered auto-labeling (if enabled and Spice API key provided)
+    const spiceApiKey = core.getInput('spice_api_key');
+    const aiAutoLabelEnabled = core.getInput('ai_auto_label') === 'true';
+    if (octokit && pullRequest.number && spiceApiKey && aiAutoLabelEnabled) {
+      await performAIAutoLabeling(
+        octokit,
+        pullRequest,
+        changedFiles,
+        spiceApiKey
+      );
     }
 
     // Auto-assign (if enabled)
@@ -201,6 +229,15 @@ async function postReportToPullRequest(
       statusBody += `### 🏷️ Auto-applied labels:\n\n`;
       autoAppliedLabels.forEach((label) => {
         statusBody += `- \`${label}\`\n`;
+      });
+      statusBody += `\n`;
+    }
+
+    // Add AI analysis section
+    if (aiAnalysisResults.length > 0) {
+      statusBody += `### 🤖 AI Analysis:\n\n`;
+      aiAnalysisResults.forEach((result) => {
+        statusBody += `${result}\n`;
       });
       statusBody += `\n`;
     }
@@ -522,6 +559,36 @@ async function getChangedFiles(
   }
 }
 
+async function getRepositoryLabels(
+  octokit: ReturnType<typeof github.getOctokit>
+): Promise<string[]> {
+  try {
+    const labels: string[] = [];
+    let page = 1;
+
+    // Paginate through all labels
+    while (true) {
+      const response = await octokit.rest.issues.listLabelsForRepo({
+        ...github.context.repo,
+        per_page: 100,
+        page: page,
+      });
+
+      if (response.data.length === 0) break;
+
+      labels.push(...response.data.map((label) => label.name));
+      if (response.data.length < 100) break;
+      page++;
+    }
+
+    core.info(`Found ${labels.length} labels in repository`);
+    return labels;
+  } catch (error) {
+    core.warning(`Failed to get repository labels: ${error}`);
+    return [];
+  }
+}
+
 async function performAutoLabeling(
   octokit: ReturnType<typeof github.getOctokit>,
   pullRequest: ContentObject,
@@ -657,6 +724,180 @@ function getTypeLabelFromTitle(title: string): string | null {
     return typeToLabel[type] ?? null;
   }
   return null;
+}
+
+// ============================================================================
+// AI Auto-labeling Functions (Spice Cloud)
+// ============================================================================
+
+async function performAIAutoLabeling(
+  octokit: ReturnType<typeof github.getOctokit>,
+  pullRequest: ContentObject,
+  changedFiles: ChangedFile[],
+  spiceApiKey: string
+): Promise<void> {
+  try {
+    core.info('Performing AI-powered auto-labeling analysis...');
+
+    const currentLabels = (pullRequest.labels || []).map((l) => l.name);
+
+    // Fetch available labels from the repository
+    const repoLabels = await getRepositoryLabels(octokit);
+
+    // Build the prompt for the LLM
+    const prompt = buildAILabelingPrompt(pullRequest, changedFiles, repoLabels);
+
+    // Call Spice Cloud LLM endpoint with structured output
+    const analysis = await callSpiceLLM(spiceApiKey, prompt);
+
+    if (!analysis || analysis.labels.length === 0) {
+      core.info('AI analysis did not suggest any labels');
+      aiAnalysisResults.push('No additional labels suggested by AI analysis.');
+      return;
+    }
+
+    // Record the AI reasoning
+    if (analysis.reasoning) {
+      aiAnalysisResults.push(`**Reasoning:** ${analysis.reasoning}`);
+    }
+
+    // Filter out labels that already exist
+    const newLabels = analysis.labels.filter(
+      (label: string) => !currentLabels.includes(label)
+    );
+
+    if (newLabels.length > 0 && pullRequest.number) {
+      try {
+        await octokit.rest.issues.addLabels({
+          ...github.context.repo,
+          issue_number: pullRequest.number,
+          labels: newLabels,
+        });
+        autoAppliedLabels.push(...newLabels.map((l: string) => `${l} (AI)`));
+        aiAnalysisResults.push(
+          `**AI-suggested labels applied:** ${newLabels.map((l: string) => `\`${l}\``).join(', ')}`
+        );
+        core.info(`AI auto-applied labels: ${newLabels.join(', ')}`);
+      } catch (error) {
+        core.warning(`Failed to apply AI-suggested labels: ${error}`);
+      }
+    } else {
+      aiAnalysisResults.push('All AI-suggested labels were already present.');
+    }
+  } catch (error) {
+    if (error instanceof Error) {
+      core.warning(`AI auto-labeling failed: ${error.message}`);
+    } else {
+      core.warning('AI auto-labeling failed with unknown error');
+    }
+  }
+}
+
+function buildAILabelingPrompt(
+  pullRequest: ContentObject,
+  changedFiles: ChangedFile[],
+  repoLabels: string[]
+): string {
+  const filesSummary = changedFiles
+    .slice(0, 50) // Limit to first 50 files to keep prompt manageable
+    .map((f) => `- ${f.filename} (+${f.additions}/-${f.deletions})`)
+    .join('\n');
+
+  return `Analyze this GitHub pull request and suggest appropriate labels.
+
+## Pull Request Details
+
+**Title:** ${pullRequest.title}
+
+**Description:**
+${pullRequest.body || 'No description provided'}
+
+**Branch:** ${pullRequest.head?.ref || 'unknown'} -> ${pullRequest.base?.ref || 'unknown'}
+
+**Changed Files (${changedFiles.length} total):**
+${filesSummary}
+${changedFiles.length > 50 ? `\n... and ${changedFiles.length - 50} more files` : ''}
+
+## Available Labels
+${repoLabels.map((l) => `- ${l}`).join('\n')}
+
+## Instructions
+Based on the pull request content, suggest the most appropriate labels from the available list above.
+Consider:
+1. The type of change (feature, bug fix, refactor, etc.)
+2. The areas affected (docs, ci, tests, config, etc.)
+3. The priority if evident from the content
+4. Any labels that match the PR content
+
+Only suggest labels from the available list. Be conservative - only suggest labels you are confident about.`;
+}
+
+function getSpiceCloudBaseUrl(region: string): string {
+  // Map region to the appropriate Spice Cloud endpoint
+  const regionEndpoints: Record<string, string> = {
+    'us-east-1': 'https://us-east-1-prod-aws-flight.spiceai.io/v1',
+    'us-west-2': 'https://us-west-2-prod-aws-flight.spiceai.io/v1',
+  };
+
+  return regionEndpoints[region] ?? 'https://data.spiceai.io/v1';
+}
+
+async function callSpiceLLM(
+  apiKey: string,
+  prompt: string
+): Promise<AILabelAnalysis | null> {
+  try {
+    const region = core.getInput('spice_cloud_region') || 'us-east-1';
+    const model = core.getInput('ai_model') || 'openai';
+    const baseURL = getSpiceCloudBaseUrl(region);
+
+    core.info(`Using Spice Cloud region: ${region}, model: ${model}`);
+
+    // Create OpenAI-compatible provider for Spice Cloud
+    const spiceProvider = createOpenAICompatible({
+      name: 'spice-cloud',
+      apiKey: apiKey,
+      baseURL: baseURL,
+      headers: {
+        'X-API-Key': apiKey,
+      },
+    });
+
+    // Use AI SDK with structured outputs for guaranteed schema compliance
+    const { output } = await generateText({
+      model: spiceProvider(model),
+      system:
+        'You are a helpful assistant that analyzes pull requests and suggests appropriate labels.',
+      prompt: prompt,
+      temperature: 0.3,
+      maxOutputTokens: 500,
+      output: Output.object({
+        schema: AILabelAnalysisSchema,
+        name: 'label_analysis',
+        description: 'Analysis of a pull request to suggest appropriate labels',
+      }),
+    });
+
+    if (!output) {
+      core.warning('AI analysis returned no structured output');
+      return null;
+    }
+
+    // Sanitize labels from the structured output
+    const sanitizedLabels = output.labels
+      .map((label) => sanitizeString(label, MAX_LABEL_NAME_LENGTH))
+      .filter((label) => label.length > 0);
+
+    return {
+      labels: sanitizedLabels,
+      reasoning: output.reasoning,
+    };
+  } catch (error) {
+    if (error instanceof Error) {
+      core.warning(`Failed to call Spice Cloud LLM: ${error.message}`);
+    }
+    return null;
+  }
 }
 
 // ============================================================================

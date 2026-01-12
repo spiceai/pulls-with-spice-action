@@ -20,6 +20,7 @@ A GitHub Action that enforces standards for pull requests with extra flavor.
   - PR title patterns (conventional commit types)
   - PR description patterns
   - PR size (lines changed)
+- **AI Auto-labeling**: Smart analysis using Spice Cloud LLM for intelligent label suggestions
 - **Auto-assignment**: Automatically assign PR authors or specific users
 - **Smart Comments**: Post detailed status reports with suggested fixes
 - **Customizable Messages**: Provide custom error messages for any check
@@ -100,6 +101,10 @@ jobs:
 | `auto_assign_author`             | Assign the PR author automatically                       | No       | `false`               |
 | `auto_assign_users`              | Users to auto-assign (comma-separated)                   | No       | -                     |
 | `custom_error_messages`          | JSON object with custom error messages                   | No       | -                     |
+| `spice_api_key`                  | Spice Cloud API Key for AI-powered features              | No       | -                     |
+| `spice_cloud_region`             | Spice Cloud region (us-east-1, eu-west-1, ap-southeast-1)| No       | `us-east-1`           |
+| `ai_auto_label`                  | Enable AI-powered smart analysis for auto-labeling       | No       | `false`               |
+| `ai_model`                       | AI model to use (e.g., openai/gpt-4o-mini, anthropic/claude-3-5-sonnet) | No | `openai/gpt-4o-mini` |
 
 ## Label Prefixes
 
@@ -155,6 +160,57 @@ When `auto_label_type` is enabled, the action parses the PR title for convention
 | `chore:`    | `kind/chore`        |
 | `security:` | `kind/security`     |
 | `deps:`     | `kind/dependencies` |
+
+## AI Auto-labeling (Spice Cloud)
+
+Enable AI-powered smart analysis to automatically suggest labels based on PR content analysis:
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v2
+  with:
+    spice_api_key: ${{ secrets.SPICE_API_KEY }}
+    ai_auto_label: 'true'
+```
+
+### Regional Configuration
+
+You can specify a Spice Cloud region for better latency:
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v2
+  with:
+    spice_api_key: ${{ secrets.SPICE_API_KEY }}
+    spice_cloud_region: 'eu-west-1'  # Options: us-east-1, eu-west-1, ap-southeast-1
+    ai_auto_label: 'true'
+```
+
+### Custom Model
+
+You can specify which AI model to use:
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v2
+  with:
+    spice_api_key: ${{ secrets.SPICE_API_KEY }}
+    ai_auto_label: 'true'
+    ai_model: 'anthropic/claude-3-5-sonnet'  # Default: openai/gpt-4o-mini
+```
+
+The AI analyzes:
+
+- PR title and description content
+- Changed files and their types
+- The nature of the changes (feature, fix, refactor, etc.)
+- Priority indicators in the PR content
+
+The AI will automatically fetch all available labels from your repository and suggest the most appropriate ones based on the PR content.
+
+### Getting a Spice Cloud API Key
+
+1. Sign up at [spice.ai](https://spice.ai)
+2. Navigate to your account settings
+3. Generate an API key
+4. Add it as a repository secret named `SPICE_API_KEY`
 
 ## Auto-assignment
 
