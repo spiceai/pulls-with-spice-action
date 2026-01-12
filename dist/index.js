@@ -56233,8 +56233,13 @@ const ai_1 = __nccwpck_require__(6619);
 const zod_1 = __nccwpck_require__(924);
 // Schema for AI label analysis response using structured outputs
 const AILabelAnalysisSchema = zod_1.z.object({
-    labels: zod_1.z.array(zod_1.z.string()).describe('Array of suggested label names from the available labels list'),
-    reasoning: zod_1.z.string().describe('Brief explanation of why these labels were chosen'),
+    labelsToAdd: zod_1.z
+        .array(zod_1.z.string())
+        .describe('Labels that should be added to the PR from the available labels list'),
+    labelsToRemove: zod_1.z
+        .array(zod_1.z.string())
+        .describe('Labels currently applied that should be removed as they are incorrect or not applicable'),
+    reasoning: zod_1.z.string().describe('Brief explanation of the label changes'),
 });
 const PR_COMMENT_TITLE = 'Pull with Spice';
 // Security: Maximum lengths to prevent DoS via extremely long inputs
@@ -56786,42 +56791,60 @@ function getTypeLabelFromTitle(title) {
 // ============================================================================
 async function performAIAutoLabeling(octokit, pullRequest, changedFiles, spiceApiKey) {
     try {
-        core.info('Performing AI-powered auto-labeling analysis...');
+        core.info('Performing AI-powered auto-labeling refinement...');
         const currentLabels = (pullRequest.labels || []).map((l) => l.name);
         // Fetch available labels from the repository
         const repoLabels = await getRepositoryLabels(octokit);
-        // Build the prompt for the LLM
-        const prompt = buildAILabelingPrompt(pullRequest, changedFiles, repoLabels);
+        // Build the prompt for the LLM, including current labels for refinement
+        const prompt = buildAILabelingPrompt(pullRequest, changedFiles, repoLabels, currentLabels);
         // Call Spice Cloud LLM endpoint with structured output
         const analysis = await callSpiceLLM(spiceApiKey, prompt);
-        if (!analysis || analysis.labels.length === 0) {
-            core.info('AI analysis did not suggest any labels');
-            aiAnalysisResults.push('No additional labels suggested by AI analysis.');
+        if (!analysis) {
+            core.info('AI analysis returned no response');
+            aiAnalysisResults.push('AI analysis could not be completed.');
             return;
         }
         // Record the AI reasoning
         if (analysis.reasoning) {
             aiAnalysisResults.push(`**Reasoning:** ${analysis.reasoning}`);
         }
-        // Filter out labels that already exist
-        const newLabels = analysis.labels.filter((label) => !currentLabels.includes(label));
-        if (newLabels.length > 0 && pullRequest.number) {
+        const labelsToAdd = analysis.labelsToAdd.filter((label) => !currentLabels.includes(label));
+        const labelsToRemove = analysis.labelsToRemove.filter((label) => currentLabels.includes(label));
+        // Remove labels that AI determined are incorrect
+        if (labelsToRemove.length > 0 && pullRequest.number) {
+            for (const label of labelsToRemove) {
+                try {
+                    await octokit.rest.issues.removeLabel({
+                        ...github.context.repo,
+                        issue_number: pullRequest.number,
+                        name: label,
+                    });
+                    core.info(`AI removed label: ${label}`);
+                }
+                catch (error) {
+                    core.warning(`Failed to remove label ${label}: ${error}`);
+                }
+            }
+            aiAnalysisResults.push(`**Labels removed by AI:** ${labelsToRemove.map((l) => `\`${l}\``).join(', ')}`);
+        }
+        // Add labels that AI suggests
+        if (labelsToAdd.length > 0 && pullRequest.number) {
             try {
                 await octokit.rest.issues.addLabels({
                     ...github.context.repo,
                     issue_number: pullRequest.number,
-                    labels: newLabels,
+                    labels: labelsToAdd,
                 });
-                autoAppliedLabels.push(...newLabels.map((l) => `${l} (AI)`));
-                aiAnalysisResults.push(`**AI-suggested labels applied:** ${newLabels.map((l) => `\`${l}\``).join(', ')}`);
-                core.info(`AI auto-applied labels: ${newLabels.join(', ')}`);
+                autoAppliedLabels.push(...labelsToAdd.map((l) => `${l} (AI)`));
+                aiAnalysisResults.push(`**Labels added by AI:** ${labelsToAdd.map((l) => `\`${l}\``).join(', ')}`);
+                core.info(`AI added labels: ${labelsToAdd.join(', ')}`);
             }
             catch (error) {
                 core.warning(`Failed to apply AI-suggested labels: ${error}`);
             }
         }
-        else {
-            aiAnalysisResults.push('All AI-suggested labels were already present.');
+        if (labelsToAdd.length === 0 && labelsToRemove.length === 0) {
+            aiAnalysisResults.push('AI analysis confirmed current labels are appropriate.');
         }
     }
     catch (error) {
@@ -56833,12 +56856,12 @@ async function performAIAutoLabeling(octokit, pullRequest, changedFiles, spiceAp
         }
     }
 }
-function buildAILabelingPrompt(pullRequest, changedFiles, repoLabels) {
+function buildAILabelingPrompt(pullRequest, changedFiles, repoLabels, currentLabels) {
     const filesSummary = changedFiles
         .slice(0, 50) // Limit to first 50 files to keep prompt manageable
         .map((f) => `- ${f.filename} (+${f.additions}/-${f.deletions})`)
         .join('\n');
-    return `Analyze this GitHub pull request and suggest appropriate labels.
+    return `Review and refine the labels on this GitHub pull request.
 
 ## Pull Request Details
 
@@ -56853,18 +56876,19 @@ ${pullRequest.body || 'No description provided'}
 ${filesSummary}
 ${changedFiles.length > 50 ? `\n... and ${changedFiles.length - 50} more files` : ''}
 
-## Available Labels
+## Currently Applied Labels
+${currentLabels.length > 0 ? currentLabels.map((l) => `- ${l}`).join('\n') : 'No labels currently applied'}
+
+## Available Labels in Repository
 ${repoLabels.map((l) => `- ${l}`).join('\n')}
 
 ## Instructions
-Based on the pull request content, suggest the most appropriate labels from the available list above.
-Consider:
-1. The type of change (feature, bug fix, refactor, etc.)
-2. The areas affected (docs, ci, tests, config, etc.)
-3. The priority if evident from the content
-4. Any labels that match the PR content
+Review the currently applied labels and suggest improvements:
+1. Identify any labels that are incorrect or don't apply to this PR (add to labelsToRemove)
+2. Identify any missing labels that should be added (add to labelsToAdd)
+3. Consider the type of change, areas affected, and priority
 
-Only suggest labels from the available list. Be conservative - only suggest labels you are confident about.`;
+Be conservative - only suggest changes you are confident about. If the current labels are appropriate, return empty arrays.`;
 }
 function getSpiceCloudBaseUrl(region) {
     // Map region to the appropriate Spice Cloud endpoint
@@ -56907,11 +56931,15 @@ async function callSpiceLLM(apiKey, prompt) {
             return null;
         }
         // Sanitize labels from the structured output
-        const sanitizedLabels = output.labels
+        const sanitizedLabelsToAdd = output.labelsToAdd
+            .map((label) => sanitizeString(label, MAX_LABEL_NAME_LENGTH))
+            .filter((label) => label.length > 0);
+        const sanitizedLabelsToRemove = output.labelsToRemove
             .map((label) => sanitizeString(label, MAX_LABEL_NAME_LENGTH))
             .filter((label) => label.length > 0);
         return {
-            labels: sanitizedLabels,
+            labelsToAdd: sanitizedLabelsToAdd,
+            labelsToRemove: sanitizedLabelsToRemove,
             reasoning: output.reasoning,
         };
     }
