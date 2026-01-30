@@ -53,12 +53,12 @@ const AILabelAnalysisSchema = z.object({
   labelsToAdd: z
     .array(z.string())
     .describe(
-      'Labels that should be added to the PR from the available labels list'
+      'Labels that should be added to the PR from the available labels list',
     ),
   labelsToRemove: z
     .array(z.string())
     .describe(
-      'Labels currently applied that should be removed as they are incorrect or not applicable'
+      'Labels currently applied that should be removed as they are incorrect or not applicable',
     ),
   reasoning: z.string().describe('Brief explanation of the label changes'),
 });
@@ -99,7 +99,7 @@ async function run(): Promise<void> {
     // If no PR in the context, this might be another event
     if (!pullRequest) {
       core.setFailed(
-        'This action only works on pull requests. No pull request found in the context.'
+        'This action only works on pull requests. No pull request found in the context.',
       );
       return;
     }
@@ -143,7 +143,7 @@ async function run(): Promise<void> {
         octokit,
         pullRequest,
         changedFiles,
-        spiceApiKey
+        spiceApiKey,
       );
     }
 
@@ -181,7 +181,7 @@ async function run(): Promise<void> {
     // If we have any errors, fail the action
     if (errorMessages.length > 0) {
       core.setFailed(
-        'Pull request checks failed. See PR comments for details.'
+        'Pull request checks failed. See PR comments for details.',
       );
       return;
     }
@@ -198,13 +198,13 @@ async function run(): Promise<void> {
 
 async function postReportToPullRequest(
   errors: string[],
-  successes: string[]
+  successes: string[],
 ): Promise<void> {
   try {
     const token = core.getInput('github_token');
     if (!token) {
       core.warning(
-        'No GitHub token provided. Unable to post comments to the PR.'
+        'No GitHub token provided. Unable to post comments to the PR.',
       );
       return;
     }
@@ -215,7 +215,7 @@ async function postReportToPullRequest(
     // Make sure we have a PR number
     if (!context.payload.pull_request?.number) {
       core.warning(
-        'Could not find pull request number in context. Unable to post comments.'
+        'Could not find pull request number in context. Unable to post comments.',
       );
       return;
     }
@@ -290,7 +290,7 @@ async function postReportToPullRequest(
 
     // Look for an existing comment from the action by checking the header pattern
     const botComment = comments.data.find((comment) =>
-      comment.body?.includes(PR_COMMENT_TITLE)
+      comment.body?.includes(PR_COMMENT_TITLE),
     );
 
     if (botComment) {
@@ -329,7 +329,7 @@ function checkTitle(pullRequest: ContentObject): void {
       errorMessages.push(errorMsg);
     } else {
       successMessages.push(
-        `Title meets minimum length requirement (${minLength} characters)`
+        `Title meets minimum length requirement (${minLength} characters)`,
       );
     }
   }
@@ -338,7 +338,7 @@ function checkTitle(pullRequest: ContentObject): void {
 function checkDescription(pullRequest: ContentObject): void {
   const minLength = parseInt(
     core.getInput('require_description_min_length'),
-    10
+    10,
   );
   if (minLength) {
     if (!pullRequest.body || pullRequest.body.length < minLength) {
@@ -348,7 +348,7 @@ function checkDescription(pullRequest: ContentObject): void {
       errorMessages.push(errorMsg);
     } else {
       successMessages.push(
-        `Description meets minimum length requirement (${minLength} characters)`
+        `Description meets minimum length requirement (${minLength} characters)`,
       );
     }
   }
@@ -389,7 +389,7 @@ function checkIssueType(pullRequest: ContentObject): void {
   // Check if any of the required issue types are in the title or body
   // Format examples: "feat: add new feature", "fix(scope): fix bug"
   const issueTypePattern = new RegExp(
-    `^(${requiredIssueTypes.join('|')})(?:\\(\\w+\\))?:\\s.+`
+    `^(${requiredIssueTypes.join('|')})(?:\\(\\w+\\))?:\\s.+`,
   );
 
   if (
@@ -402,7 +402,7 @@ function checkIssueType(pullRequest: ContentObject): void {
     errorMessages.push(errorMsg);
   } else {
     successMessages.push(
-      `Includes a valid issue type (${formatListWithBackticks(requiredIssueTypes)})`
+      `Includes a valid issue type (${formatListWithBackticks(requiredIssueTypes)})`,
     );
   }
 }
@@ -435,7 +435,7 @@ function enforceAllLabels(labels: string[]): string | void {
     !requiredLabelsAll.every((requiredLabel) => labels.includes(requiredLabel))
   ) {
     const missingLabels = requiredLabelsAll.filter(
-      (label) => !labels.includes(label)
+      (label) => !labels.includes(label),
     );
     const errorMsg =
       getCustomErrorMessage('missing_all_labels') ||
@@ -473,7 +473,7 @@ function checkAssignees(pullRequest: ContentObject): void {
       errorMessages.push(errorMsg);
     } else {
       successMessages.push(
-        `Has at least one assignee: ${formatListWithBackticks(pullRequest.assignees.map((a) => a.login))}`
+        `Has at least one assignee: ${formatListWithBackticks(pullRequest.assignees.map((a) => a.login))}`,
       );
     }
   }
@@ -515,7 +515,7 @@ function getInputArray(name: string): string[] {
 function getCustomErrorMessage(key: string): string | null {
   try {
     const customMessages: CustomErrorMessages = JSON.parse(
-      core.getInput('custom_error_messages') || '{}'
+      core.getInput('custom_error_messages') || '{}',
     );
     return customMessages[key] || null;
   } catch (error) {
@@ -536,7 +536,7 @@ function formatListWithBackticks(items: string[]): string {
 
 async function getChangedFiles(
   octokit: ReturnType<typeof github.getOctokit>,
-  prNumber: number
+  prNumber: number,
 ): Promise<ChangedFile[]> {
   try {
     const files: ChangedFile[] = [];
@@ -566,7 +566,7 @@ async function getChangedFiles(
 }
 
 async function getRepositoryLabels(
-  octokit: ReturnType<typeof github.getOctokit>
+  octokit: ReturnType<typeof github.getOctokit>,
 ): Promise<string[]> {
   try {
     const labels: string[] = [];
@@ -598,7 +598,7 @@ async function getRepositoryLabels(
 async function performAutoLabeling(
   octokit: ReturnType<typeof github.getOctokit>,
   pullRequest: ContentObject,
-  changedFiles: ChangedFile[]
+  changedFiles: ChangedFile[],
 ): Promise<void> {
   const autoLabelEnabled = core.getInput('auto_label') === 'true';
   const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
@@ -658,7 +658,7 @@ async function performAutoLabeling(
   if (autoLabelSizeEnabled && changedFiles.length > 0) {
     const totalChanges = changedFiles.reduce(
       (sum, file) => sum + file.additions + file.deletions,
-      0
+      0,
     );
     const sizeLabel = getSizeLabel(totalChanges);
     if (sizeLabel) {
@@ -681,7 +681,7 @@ async function performAutoLabeling(
 
   // Filter out labels that already exist
   const newLabels = Array.from(labelsToAdd).filter(
-    (label) => !currentLabels.includes(label)
+    (label) => !currentLabels.includes(label),
   );
 
   if (newLabels.length > 0 && pullRequest.number) {
@@ -740,7 +740,7 @@ async function performAIAutoLabeling(
   octokit: ReturnType<typeof github.getOctokit>,
   pullRequest: ContentObject,
   changedFiles: ChangedFile[],
-  spiceApiKey: string
+  spiceApiKey: string,
 ): Promise<void> {
   try {
     core.info('Performing AI-powered auto-labeling refinement...');
@@ -755,7 +755,7 @@ async function performAIAutoLabeling(
       pullRequest,
       changedFiles,
       repoLabels,
-      currentLabels
+      currentLabels,
     );
 
     // Call Spice Cloud LLM endpoint with structured output
@@ -773,10 +773,10 @@ async function performAIAutoLabeling(
     }
 
     const labelsToAdd = analysis.labelsToAdd.filter(
-      (label: string) => !currentLabels.includes(label)
+      (label: string) => !currentLabels.includes(label),
     );
     const labelsToRemove = analysis.labelsToRemove.filter((label: string) =>
-      currentLabels.includes(label)
+      currentLabels.includes(label),
     );
 
     // Remove labels that AI determined are incorrect
@@ -794,7 +794,7 @@ async function performAIAutoLabeling(
         }
       }
       aiAnalysisResults.push(
-        `**Labels removed by AI:** ${labelsToRemove.map((l: string) => `\`${l}\``).join(', ')}`
+        `**Labels removed by AI:** ${labelsToRemove.map((l: string) => `\`${l}\``).join(', ')}`,
       );
     }
 
@@ -808,7 +808,7 @@ async function performAIAutoLabeling(
         });
         autoAppliedLabels.push(...labelsToAdd.map((l: string) => `${l} (AI)`));
         aiAnalysisResults.push(
-          `**Labels added by AI:** ${labelsToAdd.map((l: string) => `\`${l}\``).join(', ')}`
+          `**Labels added by AI:** ${labelsToAdd.map((l: string) => `\`${l}\``).join(', ')}`,
         );
         core.info(`AI added labels: ${labelsToAdd.join(', ')}`);
       } catch (error) {
@@ -818,7 +818,7 @@ async function performAIAutoLabeling(
 
     if (labelsToAdd.length === 0 && labelsToRemove.length === 0) {
       aiAnalysisResults.push(
-        'AI analysis confirmed current labels are appropriate.'
+        'AI analysis confirmed current labels are appropriate.',
       );
     }
   } catch (error) {
@@ -834,7 +834,7 @@ function buildAILabelingPrompt(
   pullRequest: ContentObject,
   changedFiles: ChangedFile[],
   repoLabels: string[],
-  currentLabels: string[]
+  currentLabels: string[],
 ): string {
   const filesSummary = changedFiles
     .slice(0, 50) // Limit to first 50 files to keep prompt manageable
@@ -888,7 +888,7 @@ function isOpenAIKey(apiKey: string): boolean {
 
 async function callSpiceLLM(
   apiKey: string,
-  prompt: string
+  prompt: string,
 ): Promise<AILabelAnalysis | null> {
   try {
     const region = core.getInput('spice_cloud_region') || 'us-east-1';
@@ -908,7 +908,7 @@ async function callSpiceLLM(
         model = model.split('/').pop() || 'gpt-5-mini';
       }
       core.info(`Using OpenAI directly with model: ${model}`);
-      
+
       // Use native OpenAI provider for better structured output support
       const openai = createOpenAI({
         apiKey: apiKey,
@@ -918,7 +918,7 @@ async function callSpiceLLM(
       // Use Spice Cloud
       const baseURL = getSpiceCloudBaseUrl(region);
       core.info(`Using Spice Cloud region: ${region}, model: ${model}`);
-      
+
       // Use OpenAI-compatible provider for Spice Cloud
       const provider = createOpenAICompatible({
         name: 'spice-cloud',
@@ -976,7 +976,7 @@ async function callSpiceLLM(
 
 async function performAutoAssign(
   octokit: ReturnType<typeof github.getOctokit>,
-  pullRequest: ContentObject
+  pullRequest: ContentObject,
 ): Promise<void> {
   const autoAssignEnabled = core.getInput('auto_assign') === 'true';
   if (!autoAssignEnabled || !pullRequest.number) {
@@ -1010,7 +1010,7 @@ async function performAutoAssign(
       });
       core.info(`Auto-assigned: ${assigneesToAdd.join(', ')}`);
       successMessages.push(
-        `Auto-assigned: ${formatListWithBackticks(assigneesToAdd)}`
+        `Auto-assigned: ${formatListWithBackticks(assigneesToAdd)}`,
       );
     } catch (error) {
       core.warning(`Failed to auto-assign: ${error}`);
@@ -1033,17 +1033,17 @@ function checkLabelCategories(pullRequest: ContentObject): void {
   for (const prefixInput of requiredPrefixes) {
     const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
     const hasLabelFromCategory = labels.some((label) =>
-      label.startsWith(prefix)
+      label.startsWith(prefix),
     );
 
     if (!hasLabelFromCategory) {
       const errorMsg =
         getCustomErrorMessage(
-          `missing_category_${prefixInput.replace('/', '')}`
+          `missing_category_${prefixInput.replace('/', '')}`,
         ) || `Missing required label from category \`${prefix}\`.`;
       errorMessages.push(errorMsg);
       suggestedFixes.push(
-        `Add a label with prefix \`${prefix}\` (e.g., ${prefix}example)`
+        `Add a label with prefix \`${prefix}\` (e.g., ${prefix}example)`,
       );
     } else {
       successMessages.push(`Has a label from required category \`${prefix}\``);
@@ -1070,7 +1070,7 @@ function checkBranchNaming(pullRequest: ContentObject): void {
       `Branch name \`${branchName}\` does not match required pattern: \`${branchPattern}\``;
     errorMessages.push(errorMsg);
     suggestedFixes.push(
-      `Rename your branch to match the pattern: \`${branchPattern}\``
+      `Rename your branch to match the pattern: \`${branchPattern}\``,
     );
   } else {
     successMessages.push(`Branch name matches required pattern`);
