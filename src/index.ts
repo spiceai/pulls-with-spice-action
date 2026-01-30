@@ -1,6 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { createOpenAI } from '@ai-sdk/openai';
 import { generateText, Output } from 'ai';
 import { z } from 'zod';
 
@@ -699,10 +700,10 @@ async function performAutoLabeling(
 }
 
 function getSizeLabel(totalChanges: number): string {
-  if (totalChanges <= 10) return 'size/xs';
-  if (totalChanges <= 50) return 'size/s';
-  if (totalChanges <= 200) return 'size/m';
-  if (totalChanges <= 500) return 'size/l';
+  if (totalChanges < 50) return 'size/xs';
+  if (totalChanges < 250) return 'size/s';
+  if (totalChanges < 500) return 'size/m';
+  if (totalChanges < 1000) return 'size/l';
   return 'size/xl';
 }
 
@@ -880,40 +881,65 @@ function getSpiceCloudBaseUrl(region: string): string {
   return regionEndpoints[region] ?? 'https://data.spiceai.io/v1';
 }
 
+function isOpenAIKey(apiKey: string): boolean {
+  // OpenAI API keys start with 'sk-' (including service account keys 'sk-svcacct-')
+  return apiKey.startsWith('sk-');
+}
+
 async function callSpiceLLM(
   apiKey: string,
   prompt: string
 ): Promise<AILabelAnalysis | null> {
   try {
     const region = core.getInput('spice_cloud_region') || 'us-east-1';
-    const model = core.getInput('ai_model') || 'openai';
-    const baseURL = getSpiceCloudBaseUrl(region);
+    let model = core.getInput('ai_model') || 'openai/gpt-5-mini';
 
-    core.info(`Using Spice Cloud region: ${region}, model: ${model}`);
+    // Determine if we're using OpenAI directly or Spice Cloud
+    const useOpenAIDirect = isOpenAIKey(apiKey);
 
-    // Create OpenAI-compatible provider for Spice Cloud
-    const spiceProvider = createOpenAICompatible({
-      name: 'spice-cloud',
-      apiKey: apiKey,
-      baseURL: baseURL,
-      headers: {
-        'X-API-Key': apiKey,
-      },
-    });
+    let aiModel;
 
-    // Use AI SDK with structured outputs for guaranteed schema compliance
+    if (useOpenAIDirect) {
+      // If model doesn't include a slash (e.g., 'openai'), use a sensible default
+      if (!model.includes('/')) {
+        model = 'gpt-5-mini';
+      } else {
+        // Extract model name from 'provider/model' format
+        model = model.split('/').pop() || 'gpt-5-mini';
+      }
+      core.info(`Using OpenAI directly with model: ${model}`);
+      
+      // Use native OpenAI provider for better structured output support
+      const openai = createOpenAI({
+        apiKey: apiKey,
+      });
+      aiModel = openai(model);
+    } else {
+      // Use Spice Cloud
+      const baseURL = getSpiceCloudBaseUrl(region);
+      core.info(`Using Spice Cloud region: ${region}, model: ${model}`);
+      
+      // Use OpenAI-compatible provider for Spice Cloud
+      const provider = createOpenAICompatible({
+        name: 'spice-cloud',
+        apiKey: apiKey,
+        baseURL: baseURL,
+        headers: {
+          'X-API-Key': apiKey,
+        },
+      });
+      aiModel = provider(model);
+    }
+
+    // Use AI SDK generateText with Output.object() for structured output
     const { output } = await generateText({
-      model: spiceProvider(model),
-      system:
-        'You are a helpful assistant that analyzes pull requests and suggests appropriate labels.',
-      prompt: prompt,
-      temperature: 0.3,
-      maxOutputTokens: 500,
+      model: aiModel,
       output: Output.object({
         schema: AILabelAnalysisSchema,
-        name: 'label_analysis',
-        description: 'Analysis of a pull request to suggest appropriate labels',
       }),
+      system:
+        'You are a helpful assistant that analyzes pull requests and suggests appropriate labels. Respond with JSON.',
+      prompt: prompt,
     });
 
     if (!output) {
@@ -937,7 +963,8 @@ async function callSpiceLLM(
     };
   } catch (error) {
     if (error instanceof Error) {
-      core.warning(`Failed to call Spice Cloud LLM: ${error.message}`);
+      core.warning(`Failed to call AI LLM: ${error.message}`);
+      core.info(`Full error details: ${error.stack}`);
     }
     return null;
   }
