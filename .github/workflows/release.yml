@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Commit dist and update major version tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          MAJOR=${VERSION%%.*}
+
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+
+          git add -f dist/
+          git commit -m "Build $VERSION" || echo "No changes to commit"
+
+          # Update the tag to include dist
+          git tag -fa $VERSION -m "$VERSION"
+          git push origin $VERSION --force
+
+          # Update major version tag (e.g., v2)
+          git tag -fa $MAJOR -m "Update $MAJOR tag to $VERSION"
+          git push origin $MAJOR --force
