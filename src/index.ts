@@ -731,10 +731,10 @@ async function performAutoLabeling(
 }
 
 function getSizeLabel(totalChanges: number): string {
-  if (totalChanges < 50) return 'size/xs';
-  if (totalChanges < 250) return 'size/s';
-  if (totalChanges < 500) return 'size/m';
-  if (totalChanges < 1000) return 'size/l';
+  if (totalChanges < 11) return 'size/xs';
+  if (totalChanges < 101) return 'size/s';
+  if (totalChanges < 501) return 'size/m';
+  if (totalChanges < 2000) return 'size/l';
   return 'size/xl';
 }
 

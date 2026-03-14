@@ -137,10 +137,10 @@ When `auto_label_size` is enabled, PRs get labeled based on total lines changed:
 | Label     | Lines Changed |
 | --------- | ------------- |
 | `size/xs` | ≤ 10          |
-| `size/s`  | 11-50         |
-| `size/m`  | 51-200        |
-| `size/l`  | 201-500       |
-| `size/xl` | > 500         |
+| `size/s`  | 11-100        |
+| `size/m`  | 101-500       |
+| `size/l`  | 501-1999      |
+| `size/xl` | 2000+         |
 
 ### Type Labels from Conventional Commits
 
