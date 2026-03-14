@@ -945,7 +945,7 @@ function getSpiceCloudBaseUrl(region: string): string {
     'us-west-2': 'https://us-west-2-prod-aws-data.spiceai.io/v1',
   };
 
-  return regionEndpoints[region] ?? 'https://data.spiceai.io/v1';
+  return regionEndpoints[region] ?? regionEndpoints['us-east-1'];
 }
 
 function isOpenAIKey(apiKey: string): boolean {
@@ -1041,12 +1041,11 @@ async function callSpiceLLM(
       return sanitizeAILabelAnalysis(output);
     }
 
-    const defaultBaseURL = 'https://data.spiceai.io/v1';
-    const primaryBaseURL = getSpiceCloudBaseUrl(region);
-    const baseURLs =
-      primaryBaseURL === defaultBaseURL
-        ? [primaryBaseURL]
-        : [primaryBaseURL, defaultBaseURL];
+    const knownSpiceRegions = ['us-east-1', 'us-west-2'];
+    if (!knownSpiceRegions.includes(region)) {
+      core.warning(`Unknown Spice region "${region}". Falling back to us-east-1.`);
+    }
+    const baseURL = getSpiceCloudBaseUrl(region);
 
     const modelCandidates = modelInput.includes('/')
       ? [modelInput, modelInput.split('/')[0] || 'openai']
@@ -1058,50 +1057,48 @@ async function callSpiceLLM(
     let lastError: unknown = null;
 
     for (const candidateModel of modelCandidates) {
-      for (const baseURL of baseURLs) {
-        core.info(
-          `Using Spice Cloud region: ${region}, model: ${candidateModel}, base URL: ${baseURL}`,
-        );
+      core.info(
+        `Using Spice Cloud region: ${region}, model: ${candidateModel}, base URL: ${baseURL}`,
+      );
 
-        try {
-          const provider = createOpenAICompatible({
-            name: 'spice-cloud',
-            apiKey: apiKey,
-            baseURL: baseURL,
-            headers: {
-              'X-API-Key': apiKey,
-            },
-          });
+      try {
+        const provider = createOpenAICompatible({
+          name: 'spice-cloud',
+          apiKey: apiKey,
+          baseURL: baseURL,
+          headers: {
+            'X-API-Key': apiKey,
+          },
+        });
 
-          // Some Spice-hosted models may not support response_format strictly,
-          // so request JSON text and validate it ourselves.
-          const { text } = await generateText({
-            model: provider(candidateModel),
-            system:
-              'You analyze pull requests and suggest labels. Return only valid JSON with this exact shape: {"labelsToAdd": string[], "labelsToRemove": string[], "reasoning": string}.',
-            prompt: prompt,
-          });
+        // Some Spice-hosted models may not support response_format strictly,
+        // so request JSON text and validate it ourselves.
+        const { text } = await generateText({
+          model: provider(candidateModel),
+          system:
+            'You analyze pull requests and suggest labels. Return only valid JSON with this exact shape: {"labelsToAdd": string[], "labelsToRemove": string[], "reasoning": string}.',
+          prompt: prompt,
+        });
 
-          const parsed = parseAILabelAnalysisFromText(text);
-          if (!parsed) {
-            core.warning(
-              `AI analysis returned non-JSON output from Spice model "${candidateModel}"`,
-            );
-            core.info(`Raw AI response preview: ${text.slice(0, 500)}`);
-            continue;
-          }
-
-          return sanitizeAILabelAnalysis(parsed);
-        } catch (error) {
-          lastError = error;
-          const err = error as Error & { statusCode?: number };
-          const statusSuffix = err.statusCode
-            ? ` (status ${err.statusCode})`
-            : '';
+        const parsed = parseAILabelAnalysisFromText(text);
+        if (!parsed) {
           core.warning(
-            `Spice AI call failed for model "${candidateModel}" at ${baseURL}${statusSuffix}: ${err.message || err.name}`,
+            `AI analysis returned non-JSON output from Spice model "${candidateModel}"`,
           );
+          core.info(`Raw AI response preview: ${text.slice(0, 500)}`);
+          continue;
         }
+
+        return sanitizeAILabelAnalysis(parsed);
+      } catch (error) {
+        lastError = error;
+        const err = error as Error & { statusCode?: number };
+        const statusSuffix = err.statusCode
+          ? ` (status ${err.statusCode})`
+          : '';
+        core.warning(
+          `Spice AI call failed for model "${candidateModel}" at ${baseURL}${statusSuffix}: ${err.message || err.name}`,
+        );
       }
     }
 
