@@ -20,6 +20,7 @@ A GitHub Action that enforces standards for pull requests with extra flavor.
   - PR title patterns (conventional commit types)
   - PR description patterns
   - PR size (lines changed)
+- **AI Auto-labeling**: Smart analysis using Spice Cloud for intelligent label suggestions
 - **Auto-assignment**: Automatically assign PR authors or specific users
 - **Smart Comments**: Post detailed status reports with suggested fixes
 - **Customizable Messages**: Provide custom error messages for any check
@@ -79,27 +80,31 @@ jobs:
 
 ## Inputs
 
-| Input                            | Description                                              | Required | Default               |
-| -------------------------------- | -------------------------------------------------------- | -------- | --------------------- |
-| `github_token`                   | GitHub token for API calls and posting comments          | No       | `${{ github.token }}` |
-| `require_title_min_length`       | Minimum length of the PR title                           | No       | `0`                   |
-| `require_description_min_length` | Minimum length of the PR description                     | No       | `0`                   |
-| `required_labels_any`            | Any of these labels must be present (comma-separated)    | No       | -                     |
-| `required_labels_all`            | All of these labels must be present (comma-separated)    | No       | -                     |
-| `required_label_prefixes`        | Require a label from each prefix (comma-separated)       | No       | -                     |
-| `banned_labels`                  | None of these labels should be present (comma-separated) | No       | -                     |
-| `require_assignee`               | Require at least one assignee                            | No       | `false`               |
-| `enforce_draft`                  | Require non-draft pull requests                          | No       | `false`               |
-| `required_issue_types`           | PR must include one of these conventional commit types   | No       | -                     |
-| `require_milestone`              | Require a milestone on the PR                            | No       | `false`               |
-| `branch_name_pattern`            | Regex pattern that branch names must match               | No       | -                     |
-| `auto_label`                     | Enable automatic labeling based on file paths            | No       | `false`               |
-| `auto_label_size`                | Add size labels based on lines changed                   | No       | `false`               |
-| `auto_label_type`                | Add type labels based on conventional commit prefix      | No       | `false`               |
-| `auto_assign`                    | Enable automatic assignment                              | No       | `false`               |
-| `auto_assign_author`             | Assign the PR author automatically                       | No       | `false`               |
-| `auto_assign_users`              | Users to auto-assign (comma-separated)                   | No       | -                     |
-| `custom_error_messages`          | JSON object with custom error messages                   | No       | -                     |
+| Input                            | Description                                                         | Required | Default               |
+| -------------------------------- | ------------------------------------------------------------------- | -------- | --------------------- |
+| `github_token`                   | GitHub token for API calls and posting comments                     | No       | `${{ github.token }}` |
+| `require_title_min_length`       | Minimum length of the PR title                                      | No       | `0`                   |
+| `require_description_min_length` | Minimum length of the PR description                                | No       | `0`                   |
+| `required_labels_any`            | Any of these labels must be present (comma-separated)               | No       | -                     |
+| `required_labels_all`            | All of these labels must be present (comma-separated)               | No       | -                     |
+| `required_label_prefixes`        | Require a label from each prefix (comma-separated)                  | No       | -                     |
+| `banned_labels`                  | None of these labels should be present (comma-separated)            | No       | -                     |
+| `require_assignee`               | Require at least one assignee                                       | No       | `false`               |
+| `enforce_draft`                  | Require non-draft pull requests                                     | No       | `false`               |
+| `required_issue_types`           | PR must include one of these conventional commit types              | No       | -                     |
+| `require_milestone`              | Require a milestone on the PR                                       | No       | `false`               |
+| `branch_name_pattern`            | Regex pattern that branch names must match                          | No       | -                     |
+| `auto_label`                     | Enable automatic labeling based on file paths                       | No       | `false`               |
+| `auto_label_size`                | Add size labels based on lines changed                              | No       | `false`               |
+| `auto_label_type`                | Add type labels based on conventional commit prefix                 | No       | `false`               |
+| `auto_assign`                    | Enable automatic assignment                                         | No       | `false`               |
+| `auto_assign_author`             | Assign the PR author automatically                                  | No       | `false`               |
+| `auto_assign_users`              | Users to auto-assign (comma-separated)                              | No       | -                     |
+| `custom_error_messages`          | JSON object with custom error messages                              | No       | -                     |
+| `spice_api_key`                  | Spice Cloud API Key for AI-powered features                         | No       | -                     |
+| `spice_cloud_region`             | Spice Cloud region (us-east-1, eu-west-1, ap-southeast-1)           | No       | `us-east-1`           |
+| `ai_auto_label`                  | Enable AI-powered smart analysis for auto-labeling                  | No       | `false`               |
+| `ai_model`                       | AI model to use (e.g., openai/gpt-5.4, anthropic/claude-3-5-sonnet) | No       | `openai/gpt-5.4`      |
 
 ## Label Prefixes
 
@@ -132,10 +137,10 @@ When `auto_label_size` is enabled, PRs get labeled based on total lines changed:
 | Label     | Lines Changed |
 | --------- | ------------- |
 | `size/xs` | ≤ 10          |
-| `size/s`  | 11-50         |
-| `size/m`  | 51-200        |
-| `size/l`  | 201-500       |
-| `size/xl` | > 500         |
+| `size/s`  | 11-100        |
+| `size/m`  | 101-500       |
+| `size/l`  | 501-1999      |
+| `size/xl` | 2000+         |
 
 ### Type Labels from Conventional Commits
 
@@ -155,6 +160,59 @@ When `auto_label_type` is enabled, the action parses the PR title for convention
 | `chore:`    | `kind/chore`        |
 | `security:` | `kind/security`     |
 | `deps:`     | `kind/dependencies` |
+
+The auto-labeler keeps `kind/` labels mutually exclusive. If multiple `kind/` labels are detected, it keeps a single one, prioritizing conventional-commit type labels over path-based `kind/dependencies`.
+
+## AI Auto-labeling (Spice Cloud)
+
+Enable AI-powered smart analysis to automatically suggest labels based on PR content analysis:
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v2
+  with:
+    spice_api_key: ${{ secrets.SPICE_API_KEY }}
+    ai_auto_label: 'true'
+```
+
+### Regional Configuration
+
+You can specify a Spice Cloud region for better latency:
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v2
+  with:
+    spice_api_key: ${{ secrets.SPICE_API_KEY }}
+    spice_cloud_region: 'eu-west-1'  # Options: us-east-1, eu-west-1, ap-southeast-1
+    ai_auto_label: 'true'
+```
+
+### Custom Model
+
+You can specify which AI model to use:
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v2
+  with:
+    spice_api_key: ${{ secrets.SPICE_API_KEY }}
+    ai_auto_label: 'true'
+    ai_model: 'anthropic/claude-3-5-sonnet'  # Default: openai/gpt-5.4
+```
+
+The AI analyzes:
+
+- PR title and description content
+- Changed files and their types
+- The nature of the changes (feature, fix, refactor, etc.)
+- Priority indicators in the PR content
+
+The AI will automatically fetch all available labels from your repository and suggest the most appropriate ones based on the PR content.
+
+### Getting a Spice Cloud API Key
+
+1. Sign up at [spice.ai](https://spice.ai)
+2. Navigate to your account settings
+3. Generate an API key
+4. Add it as a repository secret named `SPICE_API_KEY`
 
 ## Auto-assignment
 

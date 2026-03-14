@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Commit dist and update release tags
+        shell: bash
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+
+          git add -f dist/
+          git commit -m "Build $VERSION" || echo "No changes to commit"
+
+          # Update the tag to include dist
+          git tag -fa "$VERSION" -m "$VERSION"
+          git push origin "$VERSION" --force
+
+          # Update major version tag only for stable semver release tags (e.g., v2.3.1 -> v2)
+          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
+            echo "Skipping major tag update for prerelease: $VERSION"
+          elif [[ "$VERSION" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
+            MAJOR="v${BASH_REMATCH[1]}"
+            git tag -fa "$MAJOR" -m "Update $MAJOR tag to $VERSION"
+            git push origin "$MAJOR" --force
+          else
+            echo "Skipping major tag update: tag '$VERSION' is not stable semver (vX.Y.Z)."
+          fi
