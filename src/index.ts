@@ -289,7 +289,8 @@ async function postReportToPullRequest(
     });
 
     // Look for an existing comment from the action by checking the header pattern
-    const botComment = comments.data.find((comment) =>
+    const botComment = comments.data.find(
+      (comment: { body?: string | null; id: number }) =>
       comment.body?.includes(PR_COMMENT_TITLE),
     );
 
@@ -571,20 +572,25 @@ async function getRepositoryLabels(
   try {
     const labels: string[] = [];
     let page = 1;
+    let hasMore = true;
 
     // Paginate through all labels
-    while (true) {
+    while (hasMore) {
       const response = await octokit.rest.issues.listLabelsForRepo({
         ...github.context.repo,
         per_page: 100,
         page: page,
       });
 
-      if (response.data.length === 0) break;
-
-      labels.push(...response.data.map((label) => label.name));
-      if (response.data.length < 100) break;
-      page++;
+      if (response.data.length === 0) {
+        hasMore = false;
+      } else {
+        labels.push(
+          ...response.data.map((label: { name: string }) => label.name),
+        );
+        hasMore = response.data.length === 100;
+        page++;
+      }
     }
 
     core.info(`Found ${labels.length} labels in repository`);
@@ -610,6 +616,8 @@ async function performAutoLabeling(
 
   const labelsToAdd: Set<string> = new Set();
   const currentLabels = (pullRequest.labels || []).map((l) => l.name);
+  const currentKindLabels = currentLabels.filter((label) => isKindLabel(label));
+  let pathBasedKindLabel: string | null = null;
 
   // Built-in rules based on file paths (only if auto_label is enabled)
   const builtInRules: AutoLabelRule[] = autoLabelEnabled
@@ -648,7 +656,15 @@ async function performAutoLabeling(
   for (const rule of builtInRules) {
     for (const file of changedFiles) {
       if (rule.paths.some((path) => file.filename.includes(path))) {
-        labelsToAdd.add(sanitizeString(rule.label, MAX_LABEL_NAME_LENGTH));
+        const sanitizedLabel = sanitizeString(rule.label, MAX_LABEL_NAME_LENGTH);
+        if (isKindLabel(sanitizedLabel)) {
+          // Keep a single path-based kind label candidate.
+          if (!pathBasedKindLabel) {
+            pathBasedKindLabel = sanitizedLabel;
+          }
+        } else {
+          labelsToAdd.add(sanitizedLabel);
+        }
         break;
       }
     }
@@ -672,10 +688,25 @@ async function performAutoLabeling(
   }
 
   // Conventional commit type-based labeling
+  let typeBasedKindLabel: string | null = null;
   if (autoLabelTypeEnabled) {
     const typeLabel = getTypeLabelFromTitle(pullRequest.title);
     if (typeLabel) {
-      labelsToAdd.add(typeLabel);
+      typeBasedKindLabel = typeLabel;
+    }
+  }
+
+  const preferredKindLabel = typeBasedKindLabel || pathBasedKindLabel;
+  if (preferredKindLabel) {
+    if (
+      currentKindLabels.length === 0 ||
+      currentKindLabels.includes(preferredKindLabel)
+    ) {
+      labelsToAdd.add(preferredKindLabel);
+    } else {
+      core.info(
+        `Skipping auto-adding kind label "${preferredKindLabel}" because pull request already has kind label(s): ${currentKindLabels.join(', ')}`,
+      );
     }
   }
 
@@ -732,6 +763,10 @@ function getTypeLabelFromTitle(title: string): string | null {
   return null;
 }
 
+function isKindLabel(label: string): boolean {
+  return label.startsWith('kind/');
+}
+
 // ============================================================================
 // AI Auto-labeling Functions (Spice Cloud)
 // ============================================================================
@@ -772,12 +807,43 @@ async function performAIAutoLabeling(
       aiAnalysisResults.push(`**Reasoning:** ${analysis.reasoning}`);
     }
 
-    const labelsToAdd = analysis.labelsToAdd.filter(
+    let labelsToAdd = analysis.labelsToAdd.filter(
       (label: string) => !currentLabels.includes(label),
     );
     const labelsToRemove = analysis.labelsToRemove.filter((label: string) =>
       currentLabels.includes(label),
     );
+
+    const aiKindLabelsToAdd = labelsToAdd.filter((label) => isKindLabel(label));
+    if (aiKindLabelsToAdd.length > 1) {
+      const preferredKindLabel = aiKindLabelsToAdd[0];
+      labelsToAdd = labelsToAdd.filter(
+        (label) => !isKindLabel(label) || label === preferredKindLabel,
+      );
+      core.info(
+        `AI suggested multiple kind labels. Keeping only: ${preferredKindLabel}`,
+      );
+    }
+
+    const currentKindLabels = currentLabels.filter((label) => isKindLabel(label));
+    const removedKindLabels = labelsToRemove.filter((label) =>
+      isKindLabel(label),
+    );
+    const remainingKindLabels = currentKindLabels.filter(
+      (label) => !removedKindLabels.includes(label),
+    );
+    const kindLabelToAdd = labelsToAdd.find((label) => isKindLabel(label));
+
+    if (
+      kindLabelToAdd &&
+      remainingKindLabels.length > 0 &&
+      !remainingKindLabels.includes(kindLabelToAdd)
+    ) {
+      labelsToAdd = labelsToAdd.filter((label) => label !== kindLabelToAdd);
+      core.info(
+        `Skipping AI kind label "${kindLabelToAdd}" because pull request already has kind label(s): ${remainingKindLabels.join(', ')}`,
+      );
+    }
 
     // Remove labels that AI determined are incorrect
     if (labelsToRemove.length > 0 && pullRequest.number) {
@@ -867,6 +933,7 @@ Review the currently applied labels and suggest improvements:
 1. Identify any labels that are incorrect or don't apply to this PR (add to labelsToRemove)
 2. Identify any missing labels that should be added (add to labelsToAdd)
 3. Consider the type of change, areas affected, and priority
+4. Ensure there is at most one label that starts with kind/
 
 Be conservative - only suggest changes you are confident about. If the current labels are appropriate, return empty arrays.`;
 }

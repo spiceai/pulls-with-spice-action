@@ -161,6 +161,8 @@ When `auto_label_type` is enabled, the action parses the PR title for convention
 | `security:` | `kind/security`     |
 | `deps:`     | `kind/dependencies` |
 
+The auto-labeler keeps `kind/` labels mutually exclusive. If multiple `kind/` labels are detected, it keeps a single one, prioritizing conventional-commit type labels over path-based `kind/dependencies`.
+
 ## AI Auto-labeling (Spice Cloud)
 
 Enable AI-powered smart analysis to automatically suggest labels based on PR content analysis:
