@@ -104,7 +104,7 @@ jobs:
 | `spice_api_key`                  | Spice Cloud API Key for AI-powered features                             | No       | -                     |
 | `spice_cloud_region`             | Spice Cloud region (us-east-1, eu-west-1, ap-southeast-1)               | No       | `us-east-1`           |
 | `ai_auto_label`                  | Enable AI-powered smart analysis for auto-labeling                      | No       | `false`               |
-| `ai_model`                       | AI model to use (e.g., openai/gpt-4o-mini, anthropic/claude-3-5-sonnet) | No       | `openai/gpt-4o-mini`  |
+| `ai_model`                       | AI model to use (e.g., openai/gpt-5.4, anthropic/claude-3-5-sonnet)     | No       | `openai/gpt-5.4`      |
 
 ## Label Prefixes
 
@@ -195,7 +195,7 @@ You can specify which AI model to use:
   with:
     spice_api_key: ${{ secrets.SPICE_API_KEY }}
     ai_auto_label: 'true'
-    ai_model: 'anthropic/claude-3-5-sonnet'  # Default: openai/gpt-4o-mini
+    ai_model: 'anthropic/claude-3-5-sonnet'  # Default: openai/gpt-5.4
 ```
 
 The AI analyzes:

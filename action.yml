@@ -79,9 +79,9 @@ inputs:
     required: false
     default: 'false'
   ai_model:
-    description: 'AI model to use for smart analysis (e.g., openai/gpt-4o-mini, anthropic/claude-3-5-sonnet)'
+    description: 'AI model to use for smart analysis (e.g., openai/gpt-5.4, anthropic/claude-3-5-sonnet)'
     required: false
-    default: 'openai/gpt-4o-mini'
+    default: 'openai/gpt-5.4'
   github_token:
     description: 'GitHub token for posting comments to PR thread'
     required: false

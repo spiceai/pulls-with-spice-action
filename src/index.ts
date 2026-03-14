@@ -1002,7 +1002,7 @@ async function callSpiceLLM(
 ): Promise<AILabelAnalysis | null> {
   try {
     const region = core.getInput('spice_cloud_region') || 'us-east-1';
-    const modelInput = core.getInput('ai_model') || 'openai/gpt-4o-mini';
+    const modelInput = core.getInput('ai_model') || 'openai/gpt-5.4';
 
     // Determine if we're using OpenAI directly or Spice Cloud
     const useOpenAIDirect = isOpenAIKey(apiKey);
@@ -1012,10 +1012,10 @@ async function callSpiceLLM(
 
       // If model doesn't include a slash (e.g., 'openai'), use a sensible default
       if (!model.includes('/')) {
-        model = model || 'gpt-4o-mini';
+        model = model || 'gpt-5.4';
       } else {
         // Extract model name from 'provider/model' format
-        model = model.split('/').pop() || 'gpt-4o-mini';
+        model = model.split('/').pop() || 'gpt-5.4';
       }
       core.info(`Using OpenAI directly with model: ${model}`);
 
