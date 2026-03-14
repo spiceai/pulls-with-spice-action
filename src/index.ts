@@ -939,10 +939,10 @@ Be conservative - only suggest changes you are confident about. If the current l
 }
 
 function getSpiceCloudBaseUrl(region: string): string {
-  // Map region to the appropriate Spice Cloud endpoint
+  // Map region to Spice Cloud HTTP data endpoints for OpenAI-compatible APIs.
   const regionEndpoints: Record<string, string> = {
-    'us-east-1': 'https://us-east-1-prod-aws-flight.spiceai.io/v1',
-    'us-west-2': 'https://us-west-2-prod-aws-flight.spiceai.io/v1',
+    'us-east-1': 'https://us-east-1-prod-aws-data.spiceai.io/v1',
+    'us-west-2': 'https://us-west-2-prod-aws-data.spiceai.io/v1',
   };
 
   return regionEndpoints[region] ?? 'https://data.spiceai.io/v1';
@@ -1051,6 +1051,9 @@ async function callSpiceLLM(
     const modelCandidates = modelInput.includes('/')
       ? [modelInput, modelInput.split('/')[0] || 'openai']
       : [modelInput];
+    if (modelInput === 'openai') {
+      modelCandidates.push('openai/gpt-4o-mini');
+    }
     if (!modelCandidates.includes('openai')) {
       modelCandidates.push('openai');
     }
