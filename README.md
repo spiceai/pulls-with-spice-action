@@ -80,31 +80,31 @@ jobs:
 
 ## Inputs
 
-| Input                            | Description                                                             | Required | Default               |
-| -------------------------------- | ----------------------------------------------------------------------- | -------- | --------------------- |
-| `github_token`                   | GitHub token for API calls and posting comments                         | No       | `${{ github.token }}` |
-| `require_title_min_length`       | Minimum length of the PR title                                          | No       | `0`                   |
-| `require_description_min_length` | Minimum length of the PR description                                    | No       | `0`                   |
-| `required_labels_any`            | Any of these labels must be present (comma-separated)                   | No       | -                     |
-| `required_labels_all`            | All of these labels must be present (comma-separated)                   | No       | -                     |
-| `required_label_prefixes`        | Require a label from each prefix (comma-separated)                      | No       | -                     |
-| `banned_labels`                  | None of these labels should be present (comma-separated)                | No       | -                     |
-| `require_assignee`               | Require at least one assignee                                           | No       | `false`               |
-| `enforce_draft`                  | Require non-draft pull requests                                         | No       | `false`               |
-| `required_issue_types`           | PR must include one of these conventional commit types                  | No       | -                     |
-| `require_milestone`              | Require a milestone on the PR                                           | No       | `false`               |
-| `branch_name_pattern`            | Regex pattern that branch names must match                              | No       | -                     |
-| `auto_label`                     | Enable automatic labeling based on file paths                           | No       | `false`               |
-| `auto_label_size`                | Add size labels based on lines changed                                  | No       | `false`               |
-| `auto_label_type`                | Add type labels based on conventional commit prefix                     | No       | `false`               |
-| `auto_assign`                    | Enable automatic assignment                                             | No       | `false`               |
-| `auto_assign_author`             | Assign the PR author automatically                                      | No       | `false`               |
-| `auto_assign_users`              | Users to auto-assign (comma-separated)                                  | No       | -                     |
-| `custom_error_messages`          | JSON object with custom error messages                                  | No       | -                     |
-| `spice_api_key`                  | Spice Cloud API Key for AI-powered features                             | No       | -                     |
-| `spice_cloud_region`             | Spice Cloud region (us-east-1, eu-west-1, ap-southeast-1)               | No       | `us-east-1`           |
-| `ai_auto_label`                  | Enable AI-powered smart analysis for auto-labeling                      | No       | `false`               |
-| `ai_model`                       | AI model to use (e.g., openai/gpt-5.4, anthropic/claude-3-5-sonnet)     | No       | `openai/gpt-5.4`      |
+| Input                            | Description                                                         | Required | Default               |
+| -------------------------------- | ------------------------------------------------------------------- | -------- | --------------------- |
+| `github_token`                   | GitHub token for API calls and posting comments                     | No       | `${{ github.token }}` |
+| `require_title_min_length`       | Minimum length of the PR title                                      | No       | `0`                   |
+| `require_description_min_length` | Minimum length of the PR description                                | No       | `0`                   |
+| `required_labels_any`            | Any of these labels must be present (comma-separated)               | No       | -                     |
+| `required_labels_all`            | All of these labels must be present (comma-separated)               | No       | -                     |
+| `required_label_prefixes`        | Require a label from each prefix (comma-separated)                  | No       | -                     |
+| `banned_labels`                  | None of these labels should be present (comma-separated)            | No       | -                     |
+| `require_assignee`               | Require at least one assignee                                       | No       | `false`               |
+| `enforce_draft`                  | Require non-draft pull requests                                     | No       | `false`               |
+| `required_issue_types`           | PR must include one of these conventional commit types              | No       | -                     |
+| `require_milestone`              | Require a milestone on the PR                                       | No       | `false`               |
+| `branch_name_pattern`            | Regex pattern that branch names must match                          | No       | -                     |
+| `auto_label`                     | Enable automatic labeling based on file paths                       | No       | `false`               |
+| `auto_label_size`                | Add size labels based on lines changed                              | No       | `false`               |
+| `auto_label_type`                | Add type labels based on conventional commit prefix                 | No       | `false`               |
+| `auto_assign`                    | Enable automatic assignment                                         | No       | `false`               |
+| `auto_assign_author`             | Assign the PR author automatically                                  | No       | `false`               |
+| `auto_assign_users`              | Users to auto-assign (comma-separated)                              | No       | -                     |
+| `custom_error_messages`          | JSON object with custom error messages                              | No       | -                     |
+| `spice_api_key`                  | Spice Cloud API Key for AI-powered features                         | No       | -                     |
+| `spice_cloud_region`             | Spice Cloud region (us-east-1, eu-west-1, ap-southeast-1)           | No       | `us-east-1`           |
+| `ai_auto_label`                  | Enable AI-powered smart analysis for auto-labeling                  | No       | `false`               |
+| `ai_model`                       | AI model to use (e.g., openai/gpt-5.4, anthropic/claude-3-5-sonnet) | No       | `openai/gpt-5.4`      |
 
 ## Label Prefixes
 
