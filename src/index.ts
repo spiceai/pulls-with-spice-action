@@ -1041,39 +1041,79 @@ async function callSpiceLLM(
       return sanitizeAILabelAnalysis(output);
     }
 
-    const model = modelInput || 'openai';
+    const defaultBaseURL = 'https://data.spiceai.io/v1';
+    const primaryBaseURL = getSpiceCloudBaseUrl(region);
+    const baseURLs =
+      primaryBaseURL === defaultBaseURL
+        ? [primaryBaseURL]
+        : [primaryBaseURL, defaultBaseURL];
 
-    // Use Spice Cloud
-    const baseURL = getSpiceCloudBaseUrl(region);
-    core.info(`Using Spice Cloud region: ${region}, model: ${model}`);
-
-    // Use OpenAI-compatible provider for Spice Cloud
-    const provider = createOpenAICompatible({
-      name: 'spice-cloud',
-      apiKey: apiKey,
-      baseURL: baseURL,
-      headers: {
-        'X-API-Key': apiKey,
-      },
-    });
-
-    // Some Spice-hosted models may not support response_format strictly,
-    // so request JSON text and validate it ourselves.
-    const { text } = await generateText({
-      model: provider(model),
-      system:
-        'You analyze pull requests and suggest labels. Return only valid JSON with this exact shape: {"labelsToAdd": string[], "labelsToRemove": string[], "reasoning": string}.',
-      prompt: prompt,
-    });
-
-    const parsed = parseAILabelAnalysisFromText(text);
-    if (!parsed) {
-      core.warning('AI analysis returned non-JSON output from Spice model');
-      core.info(`Raw AI response preview: ${text.slice(0, 500)}`);
-      return null;
+    const modelCandidates = modelInput.includes('/')
+      ? [modelInput, modelInput.split('/')[0] || 'openai']
+      : [modelInput];
+    if (!modelCandidates.includes('openai')) {
+      modelCandidates.push('openai');
     }
 
-    return sanitizeAILabelAnalysis(parsed);
+    let lastError: unknown = null;
+
+    for (const candidateModel of modelCandidates) {
+      for (const baseURL of baseURLs) {
+        core.info(
+          `Using Spice Cloud region: ${region}, model: ${candidateModel}, base URL: ${baseURL}`,
+        );
+
+        try {
+          const provider = createOpenAICompatible({
+            name: 'spice-cloud',
+            apiKey: apiKey,
+            baseURL: baseURL,
+            headers: {
+              'X-API-Key': apiKey,
+            },
+          });
+
+          // Some Spice-hosted models may not support response_format strictly,
+          // so request JSON text and validate it ourselves.
+          const { text } = await generateText({
+            model: provider(candidateModel),
+            system:
+              'You analyze pull requests and suggest labels. Return only valid JSON with this exact shape: {"labelsToAdd": string[], "labelsToRemove": string[], "reasoning": string}.',
+            prompt: prompt,
+          });
+
+          const parsed = parseAILabelAnalysisFromText(text);
+          if (!parsed) {
+            core.warning(
+              `AI analysis returned non-JSON output from Spice model "${candidateModel}"`,
+            );
+            core.info(`Raw AI response preview: ${text.slice(0, 500)}`);
+            continue;
+          }
+
+          return sanitizeAILabelAnalysis(parsed);
+        } catch (error) {
+          lastError = error;
+          const err = error as Error & { statusCode?: number };
+          const statusSuffix = err.statusCode
+            ? ` (status ${err.statusCode})`
+            : '';
+          core.warning(
+            `Spice AI call failed for model "${candidateModel}" at ${baseURL}${statusSuffix}: ${err.message || err.name}`,
+          );
+        }
+      }
+    }
+
+    if (lastError instanceof Error) {
+      core.warning(`Failed to call AI LLM: ${lastError.message}`);
+      core.info(`Full error details: ${lastError.stack}`);
+      core.info(
+        `Error payload: ${JSON.stringify(lastError, Object.getOwnPropertyNames(lastError))}`,
+      );
+    }
+
+    return null;
   } catch (error) {
     if (error instanceof Error) {
       core.warning(`Failed to call AI LLM: ${error.message}`);
