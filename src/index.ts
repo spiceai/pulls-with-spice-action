@@ -1051,9 +1051,6 @@ async function callSpiceLLM(
     const modelCandidates = modelInput.includes('/')
       ? [modelInput, modelInput.split('/')[0] || 'openai']
       : [modelInput];
-    if (modelInput === 'openai') {
-      modelCandidates.push('openai/gpt-4o-mini');
-    }
     if (!modelCandidates.includes('openai')) {
       modelCandidates.push('openai');
     }
