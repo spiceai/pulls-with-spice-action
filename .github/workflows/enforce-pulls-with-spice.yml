@@ -36,4 +36,4 @@ jobs:
           spice_api_key: ${{ secrets.SCP_SPICEAI_PULLS_WITH_SPICE_API_KEY }}
           spice_cloud_region: 'us-west-2'
           ai_auto_label: 'true'
-          ai_model: 'openai/gpt-4o-mini'
+          ai_model: 'openai'

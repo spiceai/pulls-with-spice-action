@@ -953,23 +953,66 @@ function isOpenAIKey(apiKey: string): boolean {
   return apiKey.startsWith('sk-');
 }
 
+function sanitizeAILabelAnalysis(
+  analysis: AILabelAnalysis,
+): AILabelAnalysis {
+  const sanitizedLabelsToAdd = analysis.labelsToAdd
+    .map((label: string) => sanitizeString(label, MAX_LABEL_NAME_LENGTH))
+    .filter((label: string) => label.length > 0);
+
+  const sanitizedLabelsToRemove = analysis.labelsToRemove
+    .map((label: string) => sanitizeString(label, MAX_LABEL_NAME_LENGTH))
+    .filter((label: string) => label.length > 0);
+
+  return {
+    labelsToAdd: sanitizedLabelsToAdd,
+    labelsToRemove: sanitizedLabelsToRemove,
+    reasoning: sanitizeString(analysis.reasoning, MAX_BODY_LENGTH),
+  };
+}
+
+function parseAILabelAnalysisFromText(text: string): AILabelAnalysis | null {
+  const trimmed = text.trim();
+  const candidates: string[] = [trimmed];
+
+  const firstBrace = trimmed.indexOf('{');
+  const lastBrace = trimmed.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      const validated = AILabelAnalysisSchema.safeParse(parsed);
+      if (validated.success) {
+        return validated.data;
+      }
+    } catch {
+      // Try the next parsing candidate.
+    }
+  }
+
+  return null;
+}
+
 async function callSpiceLLM(
   apiKey: string,
   prompt: string,
 ): Promise<AILabelAnalysis | null> {
   try {
     const region = core.getInput('spice_cloud_region') || 'us-east-1';
-    let model = core.getInput('ai_model') || 'openai/gpt-4o-mini';
+    const modelInput = core.getInput('ai_model') || 'openai/gpt-4o-mini';
 
     // Determine if we're using OpenAI directly or Spice Cloud
     const useOpenAIDirect = isOpenAIKey(apiKey);
 
-    let aiModel;
-
     if (useOpenAIDirect) {
+      let model = modelInput;
+
       // If model doesn't include a slash (e.g., 'openai'), use a sensible default
       if (!model.includes('/')) {
-        model = 'gpt-4o-mini';
+        model = model || 'gpt-4o-mini';
       } else {
         // Extract model name from 'provider/model' format
         model = model.split('/').pop() || 'gpt-4o-mini';
@@ -980,65 +1023,64 @@ async function callSpiceLLM(
       const openai = createOpenAI({
         apiKey: apiKey,
       });
-      aiModel = openai(model);
-    } else {
-      if (!model.includes('/')) {
-        core.warning(
-          `Invalid Spice model format "${model}". Falling back to "openai/gpt-4o-mini".`,
-        );
-        model = 'openai/gpt-4o-mini';
+      const { output } = await generateText({
+        model: openai(model),
+        output: Output.object({
+          schema: AILabelAnalysisSchema,
+        }),
+        system:
+          'You are a helpful assistant that analyzes pull requests and suggests appropriate labels. Respond with JSON.',
+        prompt: prompt,
+      });
+
+      if (!output) {
+        core.warning('AI analysis returned no structured output');
+        return null;
       }
 
-      // Use Spice Cloud
-      const baseURL = getSpiceCloudBaseUrl(region);
-      core.info(`Using Spice Cloud region: ${region}, model: ${model}`);
-
-      // Use OpenAI-compatible provider for Spice Cloud
-      const provider = createOpenAICompatible({
-        name: 'spice-cloud',
-        apiKey: apiKey,
-        baseURL: baseURL,
-        headers: {
-          'X-API-Key': apiKey,
-        },
-      });
-      aiModel = provider(model);
+      return sanitizeAILabelAnalysis(output);
     }
 
-    // Use AI SDK generateText with Output.object() for structured output
-    const { output } = await generateText({
-      model: aiModel,
-      output: Output.object({
-        schema: AILabelAnalysisSchema,
-      }),
+    const model = modelInput || 'openai';
+
+    // Use Spice Cloud
+    const baseURL = getSpiceCloudBaseUrl(region);
+    core.info(`Using Spice Cloud region: ${region}, model: ${model}`);
+
+    // Use OpenAI-compatible provider for Spice Cloud
+    const provider = createOpenAICompatible({
+      name: 'spice-cloud',
+      apiKey: apiKey,
+      baseURL: baseURL,
+      headers: {
+        'X-API-Key': apiKey,
+      },
+    });
+
+    // Some Spice-hosted models may not support response_format strictly,
+    // so request JSON text and validate it ourselves.
+    const { text } = await generateText({
+      model: provider(model),
       system:
-        'You are a helpful assistant that analyzes pull requests and suggests appropriate labels. Respond with JSON.',
+        'You analyze pull requests and suggest labels. Return only valid JSON with this exact shape: {"labelsToAdd": string[], "labelsToRemove": string[], "reasoning": string}.',
       prompt: prompt,
     });
 
-    if (!output) {
-      core.warning('AI analysis returned no structured output');
+    const parsed = parseAILabelAnalysisFromText(text);
+    if (!parsed) {
+      core.warning('AI analysis returned non-JSON output from Spice model');
+      core.info(`Raw AI response preview: ${text.slice(0, 500)}`);
       return null;
     }
 
-    // Sanitize labels from the structured output
-    const sanitizedLabelsToAdd = output.labelsToAdd
-      .map((label: string) => sanitizeString(label, MAX_LABEL_NAME_LENGTH))
-      .filter((label: string) => label.length > 0);
-
-    const sanitizedLabelsToRemove = output.labelsToRemove
-      .map((label: string) => sanitizeString(label, MAX_LABEL_NAME_LENGTH))
-      .filter((label: string) => label.length > 0);
-
-    return {
-      labelsToAdd: sanitizedLabelsToAdd,
-      labelsToRemove: sanitizedLabelsToRemove,
-      reasoning: output.reasoning,
-    };
+    return sanitizeAILabelAnalysis(parsed);
   } catch (error) {
     if (error instanceof Error) {
       core.warning(`Failed to call AI LLM: ${error.message}`);
       core.info(`Full error details: ${error.stack}`);
+      core.info(
+        `Error payload: ${JSON.stringify(error, Object.getOwnPropertyNames(error))}`,
+      );
     }
     return null;
   }
