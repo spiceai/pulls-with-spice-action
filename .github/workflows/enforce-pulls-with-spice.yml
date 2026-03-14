@@ -34,6 +34,6 @@ jobs:
           auto_label_type: 'true'
           # AI-powered auto-labeling with Spice Cloud
           spice_api_key: ${{ secrets.SCP_SPICEAI_PULLS_WITH_SPICE_API_KEY }}
-          spice_cloud_region: 'us-west-2'
+          spice_cloud_region: 'us-east-1'
           ai_auto_label: 'true'
           ai_model: 'openai'
