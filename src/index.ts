@@ -69,15 +69,18 @@ function sanitizeString(input: string | undefined, maxLength: number): string {
 
 async function run(): Promise<void> {
   try {
-    // Get details from context - pull request only
-    const pullRequest = github.context.payload.pull_request as
-      | ContentObject
-      | undefined;
+    // Accept either a pull request or an issue. Everything below except the
+    // file-based checks (size labelling, path-based labels) is an issue-level concept
+    // that applies equally to both, and GitHub's native type/priority fields exist
+    // *only* on issues — so restricting this action to PRs would make those checks
+    // unreachable.
+    const pullRequest = (github.context.payload.pull_request ??
+      github.context.payload.issue) as ContentObject | undefined;
+    const isIssue = !github.context.payload.pull_request;
 
-    // If no PR in the context, this might be another event
     if (!pullRequest) {
       core.setFailed(
-        'This action only works on pull requests. No pull request found in the context.'
+        'This action works on pull requests and issues. Neither was found in the event payload.'
       );
       return;
     }
@@ -103,6 +106,7 @@ async function run(): Promise<void> {
     if (
       octokit &&
       pullRequest.number &&
+      !isIssue &&
       (autoLabelEnabled || autoLabelSizeEnabled)
     ) {
       changedFiles = await getChangedFiles(octokit, pullRequest.number);
@@ -114,20 +118,25 @@ async function run(): Promise<void> {
     }
 
     // Auto-assign (if enabled)
+    let didAutoAssign = false;
     if (octokit && pullRequest.number) {
-      await performAutoAssign(octokit, pullRequest);
+      didAutoAssign = await performAutoAssign(octokit, pullRequest);
     }
 
-    // Refresh labels after auto-labeling (only if we made changes)
-    const needsRefresh =
-      autoAppliedLabels.length > 0 || core.getInput('auto_assign') === 'true';
+    // Re-read the PR if we changed anything on it, so the checks below evaluate the
+    // current state. This keyed off `auto_assign` before, which meant an author
+    // assignment made via `auto_assign_author` left `pullRequest.assignees` stale and
+    // `checkAssignees` failed a PR the action had just assigned.
+    const needsRefresh = autoAppliedLabels.length > 0 || didAutoAssign;
     if (octokit && pullRequest.number && needsRefresh) {
-      const freshPR = await octokit.rest.pulls.get({
+      // `issues.get` serves both — a PR is an issue — and unlike `pulls.get` it also
+      // works when this action runs on an issue event.
+      const fresh = await octokit.rest.issues.get({
         ...github.context.repo,
-        pull_number: pullRequest.number,
+        issue_number: pullRequest.number,
       });
-      pullRequest.labels = freshPR.data.labels as Label[];
-      pullRequest.assignees = freshPR.data.assignees as User[];
+      pullRequest.labels = fresh.data.labels as Label[];
+      pullRequest.assignees = fresh.data.assignees as User[];
     }
 
     // Run all the quality checks
@@ -141,13 +150,25 @@ async function run(): Promise<void> {
     checkMilestone(pullRequest);
     checkBranchNaming(pullRequest);
 
+    // Native GitHub type / priority fields (issues only — see checkNativeFields)
+    if (octokit && pullRequest.number) {
+      await checkNativeFields(octokit, pullRequest.number, isIssue);
+    }
+
     // Post the report to the PR with all messages (errors and success)
     await postReportToPullRequest(errorMessages, successMessages);
 
     // If we have any errors, fail the action
     if (errorMessages.length > 0) {
+      // Name the failing requirements in the failure itself. Previously every failure
+      // read "See PR comments for details", so the run log was identical whether a PR
+      // was missing a label, an assignee, or a milestone — anyone triaging a red check
+      // had to open the PR to learn what it wanted.
+      for (const message of errorMessages) {
+        core.error(message);
+      }
       core.setFailed(
-        'Pull request checks failed. See PR comments for details.'
+        `Pull request checks failed (${errorMessages.length}): ${errorMessages.join(' | ')}`
       );
       return;
     }
@@ -178,15 +199,17 @@ async function postReportToPullRequest(
     const octokit = github.getOctokit(token);
     const context = github.context;
 
-    // Make sure we have a PR number
-    if (!context.payload.pull_request?.number) {
+    // Works for issues as well as pull requests — the comment endpoints are the same,
+    // and without this the action would run its checks on an issue but silently post
+    // nothing.
+    const prNumber =
+      context.payload.pull_request?.number ?? context.payload.issue?.number;
+    if (!prNumber) {
       core.warning(
-        'Could not find pull request number in context. Unable to post comments.'
+        'Could not find a pull request or issue number in context. Unable to post comments.'
       );
       return;
     }
-
-    const prNumber = context.payload.pull_request.number;
 
     // Format the comment message
     const statusHeader =
@@ -582,6 +605,7 @@ async function performAutoLabeling(
   }
 
   // Size-based labeling
+  const staleSizeLabels: string[] = [];
   if (autoLabelSizeEnabled && changedFiles.length > 0) {
     const totalChanges = changedFiles.reduce(
       (sum, file) => sum + file.additions + file.deletions,
@@ -595,6 +619,16 @@ async function performAutoLabeling(
         labelsToAdd.delete(sl);
       }
       labelsToAdd.add(sizeLabel);
+      // Size is a single-valued property, so a PR that grew or shrank since the last
+      // run must lose its previous size label. Clearing it only from `labelsToAdd`
+      // deduplicated our own candidates but never touched the PR, so a PR that changed
+      // size ended up carrying two contradictory labels at once (e.g. `size/l` and
+      // `size/xl`). Collect the ones actually on the PR so they can be removed.
+      staleSizeLabels.push(
+        ...currentLabels.filter(
+          (l) => sizeLabels.includes(l) && l !== sizeLabel
+        )
+      );
     }
   }
 
@@ -622,6 +656,24 @@ async function performAutoLabeling(
       core.info(`Auto-applied labels: ${newLabels.join(', ')}`);
     } catch (error) {
       core.warning(`Failed to apply labels: ${error}`);
+    }
+  }
+
+  // Drop size labels that no longer describe this PR. Done after the add so the PR is
+  // never momentarily left with no size label at all.
+  for (const stale of new Set(staleSizeLabels)) {
+    if (!pullRequest.number) break;
+    try {
+      await octokit.rest.issues.removeLabel({
+        ...github.context.repo,
+        issue_number: pullRequest.number,
+        name: stale,
+      });
+      autoAppliedLabels.push(stale);
+      core.info(`Removed stale size label: ${stale}`);
+    } catch (error) {
+      // A 404 just means someone else removed it first — not worth failing over.
+      core.warning(`Failed to remove stale size label "${stale}": ${error}`);
     }
   }
 }
@@ -660,25 +712,205 @@ function getTypeLabelFromTitle(title: string): string | null {
 }
 
 // ============================================================================
+// Native GitHub Type / Priority Fields
+// ============================================================================
+
+interface NativeFields {
+  type: string | null;
+  /** Single-select field values, keyed by field name (e.g. "Priority" -> "P1"). */
+  singleSelects: Map<string, string>;
+}
+
+/**
+ * Reads GitHub's *native* issue type and issue field values.
+ *
+ * These replace the older convention of encoding type and priority in labels, so a
+ * repository using them no longer needs `kind/*` or `priority/*` labels to carry the
+ * same information.
+ *
+ * Only available over GraphQL, and only on issues: the `PullRequest` GraphQL type
+ * exposes neither `issueType` nor `issueFieldValues`. Returns null when the data cannot
+ * be read, which callers treat as "cannot evaluate" rather than "requirement not met" —
+ * failing a PR because a token lacked a scope would be a false positive.
+ */
+async function fetchNativeFields(
+  octokit: ReturnType<typeof github.getOctokit>,
+  issueNumber: number
+): Promise<NativeFields | null> {
+  const query = `
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          issueType { name }
+          issueFieldValues(first: 50) {
+            nodes {
+              __typename
+              ... on IssueFieldSingleSelectValue {
+                name
+                field {
+                  ... on IssueFieldSingleSelect { name }
+                }
+              }
+            }
+          }
+        }
+      }
+    }`;
+
+  try {
+    const result = await octokit.graphql<{
+      repository?: {
+        issue?: {
+          issueType?: { name?: string } | null;
+          issueFieldValues?: {
+            nodes?: Array<{
+              __typename?: string;
+              name?: string | null;
+              field?: { name?: string | null } | null;
+            } | null> | null;
+          } | null;
+        } | null;
+      } | null;
+    }>(query, {
+      ...github.context.repo,
+      number: issueNumber,
+    });
+
+    const issue = result?.repository?.issue;
+    if (!issue) {
+      return null;
+    }
+
+    const singleSelects = new Map<string, string>();
+    for (const node of issue.issueFieldValues?.nodes ?? []) {
+      const fieldName = node?.field?.name;
+      const optionName = node?.name;
+      if (fieldName && optionName) {
+        singleSelects.set(fieldName.toLowerCase(), optionName);
+      }
+    }
+
+    return { type: issue.issueType?.name ?? null, singleSelects };
+  } catch (error) {
+    core.warning(
+      `Could not read native type/priority fields: ${error}. ` +
+        'These checks need a token with `read:project`/issue read access on a repository ' +
+        'whose organization has issue types configured; skipping them rather than failing.'
+    );
+    return null;
+  }
+}
+
+async function checkNativeFields(
+  octokit: ReturnType<typeof github.getOctokit>,
+  issueNumber: number,
+  isIssue: boolean
+): Promise<void> {
+  const requireType = core.getInput('require_issue_type') === 'true';
+  const allowedTypes = getInputArray('allowed_issue_types');
+  const priorityForTypes = getInputArray('require_priority_for_types');
+  const priorityFieldName = core.getInput('priority_field_name') || 'Priority';
+
+  if (
+    !requireType &&
+    allowedTypes.length === 0 &&
+    priorityForTypes.length === 0
+  ) {
+    return; // Feature not enabled
+  }
+
+  // Pull requests have no native type or field values — enforcing them here would fail
+  // every PR for a property GitHub gives it no way to set. Say so once, clearly, rather
+  // than failing or silently doing nothing.
+  if (!isIssue) {
+    core.info(
+      'Skipping native type/priority checks: GitHub exposes these fields on issues only, not pull requests.'
+    );
+    return;
+  }
+
+  const fields = await fetchNativeFields(octokit, issueNumber);
+  if (!fields) {
+    return; // Already warned; do not fail on unreadable data
+  }
+
+  // --- Type -------------------------------------------------------------------
+  if (requireType && !fields.type) {
+    errorMessages.push(
+      getCustomErrorMessage('no_issue_type') ||
+        'This issue needs a type. Set it with the **Type** field in the sidebar.'
+    );
+  } else if (fields.type) {
+    if (
+      allowedTypes.length > 0 &&
+      !allowedTypes.some((t) => t.toLowerCase() === fields.type?.toLowerCase())
+    ) {
+      errorMessages.push(
+        getCustomErrorMessage('invalid_native_issue_type') ||
+          `Issue type \`${fields.type}\` is not one of the allowed types: ${formatListWithBackticks(allowedTypes)}.`
+      );
+    } else {
+      successMessages.push(`Has issue type: \`${fields.type}\``);
+    }
+  }
+
+  // --- Priority ---------------------------------------------------------------
+  // Only required for the configured types (typically bugs), because triage urgency is
+  // meaningful for a defect and mostly noise for a chore.
+  if (priorityForTypes.length === 0 || !fields.type) {
+    return;
+  }
+  const needsPriority = priorityForTypes.some(
+    (t) => t.toLowerCase() === fields.type?.toLowerCase()
+  );
+  if (!needsPriority) {
+    return;
+  }
+
+  const priority = fields.singleSelects.get(priorityFieldName.toLowerCase());
+  if (!priority) {
+    errorMessages.push(
+      getCustomErrorMessage('no_priority') ||
+        `A \`${fields.type}\` issue needs a **${priorityFieldName}**. Set the ${priorityFieldName} field in the sidebar.`
+    );
+  } else {
+    successMessages.push(`Has ${priorityFieldName}: \`${priority}\``);
+  }
+}
+
+// ============================================================================
 // Auto-assign Functions
 // ============================================================================
 
+/**
+ * Assigns the PR author and/or a configured user list, when the PR has no assignees.
+ * Returns true if assignees were actually added, so the caller knows the PR's assignee
+ * list is now stale and must be re-read before `require_assignee` is evaluated.
+ */
 async function performAutoAssign(
   octokit: ReturnType<typeof github.getOctokit>,
   pullRequest: ContentObject
-): Promise<void> {
+): Promise<boolean> {
+  const autoAssignees = getInputArray('auto_assign_users');
+  const assignAuthor = core.getInput('auto_assign_author') === 'true';
   const autoAssignEnabled = core.getInput('auto_assign') === 'true';
-  if (!autoAssignEnabled || !pullRequest.number) {
-    return;
+
+  // `auto_assign_author` and `auto_assign_users` each enable assignment on their own.
+  // They used to be gated behind `auto_assign`, which made the documented quick-start
+  // config (`auto_assign_author: 'true'` with `auto_assign` left at its `false` default)
+  // silently do nothing — and then fail the PR under `require_assignee` for having no
+  // assignee the action was asked to add. `auto_assign` remains supported as the
+  // umbrella switch so existing configs keep working.
+  const shouldAssign =
+    autoAssignEnabled || assignAuthor || autoAssignees.length > 0;
+  if (!shouldAssign || !pullRequest.number) {
+    return false;
   }
 
   // Check if already has assignees
   if (pullRequest.assignees && pullRequest.assignees.length > 0) {
-    return;
+    return false;
   }
-
-  const autoAssignees = getInputArray('auto_assign_users');
-  const assignAuthor = core.getInput('auto_assign_author') === 'true';
 
   const assigneesToAdd: string[] = [];
 
@@ -692,19 +924,35 @@ async function performAutoAssign(
 
   if (assigneesToAdd.length > 0) {
     try {
-      await octokit.rest.issues.addAssignees({
+      const response = await octokit.rest.issues.addAssignees({
         ...github.context.repo,
         issue_number: pullRequest.number,
         assignees: [...new Set(assigneesToAdd)],
       });
-      core.info(`Auto-assigned: ${assigneesToAdd.join(', ')}`);
+      // GitHub silently drops assignees it will not accept — App/bot accounts such as
+      // dependabot[bot], and users without repository access. The request still returns
+      // 201, so the only way to know whether anything was actually assigned is to read
+      // the assignee list back off the response.
+      const assigned = (response.data.assignees ?? []).map((a) => a.login);
+      if (assigned.length === 0) {
+        core.warning(
+          `Auto-assign was requested for ${formatListWithBackticks(assigneesToAdd)}, but GitHub accepted none of them. ` +
+            'This is expected for App/bot authors (for example `dependabot[bot]`), which cannot be assigned, ' +
+            'and for users without access to this repository.'
+        );
+        return false;
+      }
+      core.info(`Auto-assigned: ${assigned.join(', ')}`);
       successMessages.push(
-        `Auto-assigned: ${formatListWithBackticks(assigneesToAdd)}`
+        `Auto-assigned: ${formatListWithBackticks(assigned)}`
       );
+      return true;
     } catch (error) {
       core.warning(`Failed to auto-assign: ${error}`);
     }
   }
+
+  return false;
 }
 
 // ============================================================================
