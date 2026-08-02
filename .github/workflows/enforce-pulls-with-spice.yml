@@ -21,5 +21,4 @@ jobs:
           banned_labels: 'invalid,wontfix,nomerge,duplicate'
           require_assignee: 'true'
           auto_label: 'true'
-          auto_label_size: 'true'
           auto_label_type: 'true'

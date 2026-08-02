@@ -19,7 +19,6 @@ A GitHub Action that enforces standards for pull requests with extra flavor.
   - Changed file paths
   - PR title patterns (conventional commit types)
   - PR description patterns
-  - PR size (lines changed)
 - **Auto-assignment**: Automatically assign PR authors or specific users
 - **Smart Comments**: Post detailed status reports with suggested fixes
 - **Customizable Messages**: Provide custom error messages for any check
@@ -46,7 +45,6 @@ jobs:
         with:
           # Enable only what you need - all checks are off by default
           auto_label: 'true'
-          auto_label_size: 'true'
           auto_assign_author: 'true'
 ```
 
@@ -71,7 +69,6 @@ jobs:
     branch_name_pattern: '^(feature|fix|docs|chore)/.*'
     # Automation features
     auto_label: 'true'
-    auto_label_size: 'true'
     auto_label_type: 'true'
     auto_assign: 'true'
     auto_assign_author: 'true'
@@ -94,7 +91,6 @@ jobs:
 | `require_milestone`              | Require a milestone on the PR                            | No       | `false`               |
 | `branch_name_pattern`            | Regex pattern that branch names must match               | No       | -                     |
 | `auto_label`                     | Enable automatic labeling based on file paths            | No       | `false`               |
-| `auto_label_size`                | Add size labels based on lines changed                   | No       | `false`               |
 | `auto_label_type`                | Add type labels based on conventional commit prefix      | No       | `false`               |
 | `auto_assign`                    | Enable automatic assignment                              | No       | `false`               |
 | `auto_assign_author`             | Assign the PR author automatically                       | No       | `false`               |
@@ -124,18 +120,6 @@ When `auto_label` is enabled, the action automatically applies labels based on:
 | `area/tests`        | Files in `test/`, `tests/`, `__tests__/`, `spec/`               |
 | `area/config`       | Config files: `.json`, `.yaml`, `.yml`, `.toml`, `.ini`, `.env` |
 | `kind/dependencies` | Lock files: `package-lock.json`, `yarn.lock`, `go.sum`, etc.    |
-
-### Size Labels
-
-When `auto_label_size` is enabled, PRs get labeled based on total lines changed:
-
-| Label     | Lines Changed |
-| --------- | ------------- |
-| `size/xs` | ≤ 10          |
-| `size/s`  | 11-50         |
-| `size/m`  | 51-200        |
-| `size/l`  | 201-500       |
-| `size/xl` | > 500         |
 
 ### Type Labels from Conventional Commits
 

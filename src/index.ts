@@ -96,15 +96,10 @@ async function run(): Promise<void> {
 
     // Determine which features need file data (optimization: only fetch if needed)
     const autoLabelEnabled = core.getInput('auto_label') === 'true';
-    const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
 
     // Get changed files for auto-labeling (if enabled)
     let changedFiles: ChangedFile[] = [];
-    if (
-      octokit &&
-      pullRequest.number &&
-      (autoLabelEnabled || autoLabelSizeEnabled)
-    ) {
+    if (octokit && pullRequest.number && autoLabelEnabled) {
       changedFiles = await getChangedFiles(octokit, pullRequest.number);
     }
 
@@ -528,10 +523,9 @@ async function performAutoLabeling(
   changedFiles: ChangedFile[]
 ): Promise<void> {
   const autoLabelEnabled = core.getInput('auto_label') === 'true';
-  const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
   const autoLabelTypeEnabled = core.getInput('auto_label_type') === 'true';
 
-  if (!autoLabelEnabled && !autoLabelSizeEnabled && !autoLabelTypeEnabled) {
+  if (!autoLabelEnabled && !autoLabelTypeEnabled) {
     return;
   }
 
@@ -581,23 +575,6 @@ async function performAutoLabeling(
     }
   }
 
-  // Size-based labeling
-  if (autoLabelSizeEnabled && changedFiles.length > 0) {
-    const totalChanges = changedFiles.reduce(
-      (sum, file) => sum + file.additions + file.deletions,
-      0
-    );
-    const sizeLabel = getSizeLabel(totalChanges);
-    if (sizeLabel) {
-      // Remove any existing size labels from our set
-      const sizeLabels = ['size/xs', 'size/s', 'size/m', 'size/l', 'size/xl'];
-      for (const sl of sizeLabels) {
-        labelsToAdd.delete(sl);
-      }
-      labelsToAdd.add(sizeLabel);
-    }
-  }
-
   // Conventional commit type-based labeling
   if (autoLabelTypeEnabled) {
     const typeLabel = getTypeLabelFromTitle(pullRequest.title);
@@ -624,14 +601,6 @@ async function performAutoLabeling(
       core.warning(`Failed to apply labels: ${error}`);
     }
   }
-}
-
-function getSizeLabel(totalChanges: number): string {
-  if (totalChanges <= 10) return 'size/xs';
-  if (totalChanges <= 50) return 'size/s';
-  if (totalChanges <= 200) return 'size/m';
-  if (totalChanges <= 500) return 'size/l';
-  return 'size/xl';
 }
 
 function getTypeLabelFromTitle(title: string): string | null {
