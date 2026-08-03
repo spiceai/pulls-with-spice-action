@@ -7,11 +7,41 @@ on:
   merge_group:
     types: [checks_requested]
 
+# This action applies labels and assignees, and those writes emit `labeled` /
+# `assigned` events that re-trigger this same workflow. Collapse to the newest run
+# per pull request so the runs cannot race each other onto one PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   enforce-pull-with-spice:
     runs-on: spiceai-macos
     steps:
       - uses: actions/checkout@v6
+        if: github.event_name == 'pull_request'
+      - uses: actions/setup-node@v6
+        if: github.event_name == 'pull_request'
+        with:
+          node-version: '24'
+          cache: 'npm'
+      # --ignore-scripts: on a pull_request event the checkout is the PR's own code, so
+      # `npm ci` would run lifecycle scripts an outside contributor wrote. Nothing in
+      # lint, typecheck or the esbuild bundle needs them.
+      - run: npm ci --ignore-scripts
+        if: github.event_name == 'pull_request'
+      - run: npm run lint
+        if: github.event_name == 'pull_request'
+      # esbuild strips types without checking them, so nothing else in this pipeline
+      # would catch a type error in src/.
+      - run: npm run typecheck
+        if: github.event_name == 'pull_request'
+      # dist/ is not committed; it is built here and on release.
+      - run: npm run build
         if: github.event_name == 'pull_request'
       - uses: ./
         if: github.event_name == 'pull_request'
@@ -22,3 +52,7 @@ jobs:
           require_assignee: 'true'
           auto_label: 'true'
           auto_label_type: 'true'
+          # AI-powered auto-labeling with Spice Cloud
+          spice_api_key: ${{ secrets.SCP_SPICEAI_PULLS_WITH_SPICE_API_KEY }}
+          spice_cloud_region: 'us-west-2'
+          ai_auto_label: 'true'

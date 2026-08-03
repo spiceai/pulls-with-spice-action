@@ -77,6 +77,21 @@ inputs:
   custom_error_messages:
     description: 'JSON object with custom error messages for various checks'
     required: false
+  spice_api_key:
+    description: "Spice Cloud API key for AI-powered features. A key starting with 'sk-' is treated as an OpenAI key and used against OpenAI directly."
+    required: false
+  spice_cloud_region:
+    description: 'Spice Cloud region: us-east-1 or us-west-2. Ignored when using an OpenAI key.'
+    required: false
+    default: 'us-east-1'
+  ai_auto_label:
+    description: 'Review the labels applied to the pull request with an AI model, adding and removing labels it judges wrong'
+    required: false
+    default: 'false'
+  ai_model:
+    description: "Model name, passed to the endpoint verbatim. On Spice Cloud this is the model's name in your spicepod; against OpenAI it is a model id such as 'gpt-5.4'."
+    required: false
+    default: 'openai'
   github_token:
     description: 'GitHub token for posting comments to PR thread'
     required: false

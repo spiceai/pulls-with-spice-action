@@ -19,6 +19,7 @@ A GitHub Action that enforces standards for pull requests with extra flavor.
   - Changed file paths
   - PR title patterns (conventional commit types)
   - PR description patterns
+- **AI Auto-labeling**: Smart analysis using Spice Cloud for intelligent label suggestions
 - **Auto-assignment**: Automatically assign PR authors or specific users
 - **Smart Comments**: Post detailed status reports with suggested fixes
 - **Customizable Messages**: Provide custom error messages for any check
@@ -100,6 +101,10 @@ jobs:
 | `auto_assign_author`             | Assign the PR author automatically                       | No       | `false`               |
 | `auto_assign_users`              | Users to auto-assign (comma-separated)                   | No       | -                     |
 | `custom_error_messages`          | JSON object with custom error messages                   | No       | -                     |
+| `spice_api_key`                  | Spice Cloud (or OpenAI) API key for AI features          | No       | -                     |
+| `spice_cloud_region`             | Spice Cloud region (`us-east-1`, `us-west-2`)            | No       | `us-east-1`           |
+| `ai_auto_label`                  | Enable AI label review after the rule-based pass         | No       | `false`               |
+| `ai_model`                       | Model to use for the AI pass                             | No       | `openai`              |
 
 ## Native Type and Priority (issues)
 
@@ -194,6 +199,105 @@ When `auto_label_type` is enabled, the action parses the PR title for convention
 | `chore:`    | `kind/chore`        |
 | `security:` | `kind/security`     |
 | `deps:`     | `kind/dependencies` |
+
+The auto-labeler keeps `kind/` labels mutually exclusive. If multiple `kind/` labels are detected, it keeps a single one, prioritizing conventional-commit type labels over path-based `kind/dependencies`.
+
+## AI Auto-labeling (Spice Cloud)
+
+The rule-based labelers above match file paths and title prefixes, so they cannot tell a
+dependency bump that happens to touch a lock file from a feature that happens to touch
+one. `ai_auto_label` adds a review pass that can correct them: it sends the PR's title,
+description, changed files, current labels and the repository's full label list to a
+model, and applies the additions and removals the model returns.
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v2
+  with:
+    spice_api_key: ${{ secrets.SPICE_API_KEY }}
+    ai_auto_label: 'true'
+```
+
+It runs only when `ai_auto_label` is `true` **and** `spice_api_key` is set, and it never
+fails the run: if the model is unreachable or answers with something unusable, the action
+warns and keeps the rule-based labels.
+
+Because it reviews rather than merely suggests, it **removes** labels too. Four limits
+bound what it is allowed to do:
+
+- It can only apply labels that **already exist** in the repository — `addLabels` would
+  otherwise create an invented name as a new repository label.
+- It cannot remove a label your configuration requires. If `required_label_prefixes`,
+  `required_labels_any` or `required_labels_all` would be violated by a removal, the
+  label stays and the action logs why. Without this the pass could strip the last
+  `kind/` label and the checks in the same run would then fail the PR for missing it.
+- It cannot add anything listed in `banned_labels`.
+- It enforces the same one-`kind/`-label rule as the rule-based pass.
+
+It also **only runs for authors who already have write access.** The PR title and
+description are attacker-controlled text going into a model prompt whose answer is then
+applied, so on an `issues` trigger — where anyone can open an issue and secrets are
+present — an ungated pass would let a stranger drive your labels. Everyone else still
+gets the rule-based labels and the checks.
+
+Write access is established from `author_association`, or from the branch living in this
+repository rather than a fork, or failing both by asking the API. The extra checks matter
+because `author_association` reports `MEMBER` only for *public* organization membership —
+on its own it locks out maintainers whose membership is private.
+
+### Region
+
+Spice Cloud is reached over its regional data endpoints. Supported values:
+
+```yaml
+spice_cloud_region: 'us-west-2' # us-east-1 (default), us-west-2
+```
+
+An unrecognized region warns and falls back to `us-east-1`.
+
+### Model
+
+`ai_model` is passed through to the endpoint as the model name, so the value is whatever
+your Spice Cloud deployment calls the model — the name under `models:` in your spicepod,
+`openai` by default:
+
+```yaml
+ai_model: 'openai'
+```
+
+### Using OpenAI directly
+
+A `spice_api_key` beginning with `sk-` is treated as an OpenAI API key and sent straight
+to OpenAI, with `spice_cloud_region` ignored. Give `ai_model` a bare OpenAI model name:
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v2
+  with:
+    spice_api_key: ${{ secrets.OPENAI_API_KEY }}
+    ai_auto_label: 'true'
+    ai_model: 'gpt-5.4'
+```
+
+## Releasing
+
+`dist/` is not committed to the branch — it is built onto the tag. Release by running
+the **Release** workflow (`workflow_dispatch`) with the version, e.g. `v2.1.0`:
+
+1. Lints, typechecks and builds the bundle, then runs it to confirm it loads.
+2. Commits `dist/` as a child of the released source commit and creates the version tag
+   there.
+3. Moves the floating major tag (`v2`) — skipped for prereleases.
+4. Publishes the GitHub Release.
+
+The version tag is created once, already containing a verified bundle, and is never
+moved afterwards; re-running with an existing version is refused. Only the major tag
+floats.
+
+### Getting a Spice Cloud API Key
+
+1. Sign up at [spice.ai](https://spice.ai)
+2. Navigate to your account settings
+3. Generate an API key
+4. Add it as a repository secret named `SPICE_API_KEY`
 
 ## Auto-assignment
 
