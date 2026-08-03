@@ -22,12 +22,12 @@
     "author": "Luke Kim (Spice AI)",
     "license": "Apache-2.0",
     "dependencies": {
-        "@actions/core": "^3.0.0",
-        "@actions/github": "^9.0.0",
+        "@actions/core": "^3.0.1",
+        "@actions/github": "^9.1.1",
         "@ai-sdk/openai": "^3.0.41",
         "@ai-sdk/openai-compatible": "^2.0.35",
         "ai": "^6.0.116",
-        "zod": "^4.3.6"
+        "zod": "^4.4.3"
     },
     "devDependencies": {
         "@types/jest": "^30.0.0",
