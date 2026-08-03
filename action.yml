@@ -59,10 +59,6 @@ inputs:
     description: 'Enable automatic labeling based on file paths and conventional commits'
     required: false
     default: 'false'
-  auto_label_size:
-    description: 'Automatically add size labels (size/xs, size/s, size/m, size/l, size/xl) based on changes'
-    required: false
-    default: 'false'
   auto_label_type:
     description: 'Automatically add type labels based on conventional commit prefixes in title'
     required: false

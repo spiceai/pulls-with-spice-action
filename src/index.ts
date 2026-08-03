@@ -52,6 +52,8 @@ const MAX_BODY_LENGTH = 65536;
 const MAX_LABEL_NAME_LENGTH = 100;
 const MAX_LABELS_COUNT = 100;
 const MAX_CHANGED_FILES = 3000;
+/** Pages of `issueFieldValues` read before giving up — see `fetchNativeFields`. */
+const MAX_FIELD_VALUE_PAGES = 10;
 // Collect errors and success messages
 const errorMessages: string[] = [];
 const successMessages: string[] = [];
@@ -99,16 +101,10 @@ async function run(): Promise<void> {
 
     // Determine which features need file data (optimization: only fetch if needed)
     const autoLabelEnabled = core.getInput('auto_label') === 'true';
-    const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
 
     // Get changed files for auto-labeling (if enabled)
     let changedFiles: ChangedFile[] = [];
-    if (
-      octokit &&
-      pullRequest.number &&
-      !isIssue &&
-      (autoLabelEnabled || autoLabelSizeEnabled)
-    ) {
+    if (octokit && pullRequest.number && !isIssue && autoLabelEnabled) {
       changedFiles = await getChangedFiles(octokit, pullRequest.number);
     }
 
@@ -551,10 +547,9 @@ async function performAutoLabeling(
   changedFiles: ChangedFile[]
 ): Promise<void> {
   const autoLabelEnabled = core.getInput('auto_label') === 'true';
-  const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
   const autoLabelTypeEnabled = core.getInput('auto_label_type') === 'true';
 
-  if (!autoLabelEnabled && !autoLabelSizeEnabled && !autoLabelTypeEnabled) {
+  if (!autoLabelEnabled && !autoLabelTypeEnabled) {
     return;
   }
 
@@ -604,34 +599,6 @@ async function performAutoLabeling(
     }
   }
 
-  // Size-based labeling
-  const staleSizeLabels: string[] = [];
-  if (autoLabelSizeEnabled && changedFiles.length > 0) {
-    const totalChanges = changedFiles.reduce(
-      (sum, file) => sum + file.additions + file.deletions,
-      0
-    );
-    const sizeLabel = getSizeLabel(totalChanges);
-    if (sizeLabel) {
-      // Remove any existing size labels from our set
-      const sizeLabels = ['size/xs', 'size/s', 'size/m', 'size/l', 'size/xl'];
-      for (const sl of sizeLabels) {
-        labelsToAdd.delete(sl);
-      }
-      labelsToAdd.add(sizeLabel);
-      // Size is a single-valued property, so a PR that grew or shrank since the last
-      // run must lose its previous size label. Clearing it only from `labelsToAdd`
-      // deduplicated our own candidates but never touched the PR, so a PR that changed
-      // size ended up carrying two contradictory labels at once (e.g. `size/l` and
-      // `size/xl`). Collect the ones actually on the PR so they can be removed.
-      staleSizeLabels.push(
-        ...currentLabels.filter(
-          (l) => sizeLabels.includes(l) && l !== sizeLabel
-        )
-      );
-    }
-  }
-
   // Conventional commit type-based labeling
   if (autoLabelTypeEnabled) {
     const typeLabel = getTypeLabelFromTitle(pullRequest.title);
@@ -658,32 +625,6 @@ async function performAutoLabeling(
       core.warning(`Failed to apply labels: ${error}`);
     }
   }
-
-  // Drop size labels that no longer describe this PR. Done after the add so the PR is
-  // never momentarily left with no size label at all.
-  for (const stale of new Set(staleSizeLabels)) {
-    if (!pullRequest.number) break;
-    try {
-      await octokit.rest.issues.removeLabel({
-        ...github.context.repo,
-        issue_number: pullRequest.number,
-        name: stale,
-      });
-      autoAppliedLabels.push(stale);
-      core.info(`Removed stale size label: ${stale}`);
-    } catch (error) {
-      // A 404 just means someone else removed it first — not worth failing over.
-      core.warning(`Failed to remove stale size label "${stale}": ${error}`);
-    }
-  }
-}
-
-function getSizeLabel(totalChanges: number): string {
-  if (totalChanges <= 10) return 'size/xs';
-  if (totalChanges <= 50) return 'size/s';
-  if (totalChanges <= 200) return 'size/m';
-  if (totalChanges <= 500) return 'size/l';
-  return 'size/xl';
 }
 
 function getTypeLabelFromTitle(title: string): string | null {
@@ -721,6 +662,26 @@ interface NativeFields {
   singleSelects: Map<string, string>;
 }
 
+/** One page of the `fetchNativeFields` GraphQL response. */
+interface NativeFieldsQuery {
+  repository?: {
+    issue?: {
+      issueType?: { name?: string } | null;
+      issueFieldValues?: {
+        pageInfo?: {
+          hasNextPage?: boolean | null;
+          endCursor?: string | null;
+        } | null;
+        nodes?: Array<{
+          __typename?: string;
+          name?: string | null;
+          field?: { name?: string | null } | null;
+        } | null> | null;
+      } | null;
+    } | null;
+  } | null;
+}
+
 /**
  * Reads GitHub's *native* issue type and issue field values.
  *
@@ -738,11 +699,12 @@ async function fetchNativeFields(
   issueNumber: number
 ): Promise<NativeFields | null> {
   const query = `
-    query($owner: String!, $repo: String!, $number: Int!) {
+    query($owner: String!, $repo: String!, $number: Int!, $after: String) {
       repository(owner: $owner, name: $repo) {
         issue(number: $number) {
           issueType { name }
-          issueFieldValues(first: 50) {
+          issueFieldValues(first: 50, after: $after) {
+            pageInfo { hasNextPage endCursor }
             nodes {
               __typename
               ... on IssueFieldSingleSelectValue {
@@ -758,39 +720,62 @@ async function fetchNativeFields(
     }`;
 
   try {
-    const result = await octokit.graphql<{
-      repository?: {
-        issue?: {
-          issueType?: { name?: string } | null;
-          issueFieldValues?: {
-            nodes?: Array<{
-              __typename?: string;
-              name?: string | null;
-              field?: { name?: string | null } | null;
-            } | null> | null;
-          } | null;
-        } | null;
-      } | null;
-    }>(query, {
-      ...github.context.repo,
-      number: issueNumber,
-    });
-
-    const issue = result?.repository?.issue;
-    if (!issue) {
-      return null;
-    }
-
     const singleSelects = new Map<string, string>();
-    for (const node of issue.issueFieldValues?.nodes ?? []) {
-      const fieldName = node?.field?.name;
-      const optionName = node?.name;
-      if (fieldName && optionName) {
-        singleSelects.set(fieldName.toLowerCase(), optionName);
+    let type: string | null = null;
+    let after: string | null = null;
+
+    // Paged, because a field that exists but sits past the page read is
+    // indistinguishable from one that was never set — and the caller reads a
+    // missing field as "requirement not met". One page covers every issue in
+    // practice; the cap only bounds a runaway, and reaching it returns null
+    // ("cannot evaluate") rather than a map that is quietly incomplete.
+    for (let page = 0; page < MAX_FIELD_VALUE_PAGES; page++) {
+      // Annotated rather than inferred: `after` is assigned from this response
+      // and passed back into the next request, and an inferred `result` would
+      // make that loop-carried cursor circular (TS7022).
+      const result: NativeFieldsQuery = await octokit.graphql<NativeFieldsQuery>(
+        query,
+        {
+          ...github.context.repo,
+          number: issueNumber,
+          after,
+        }
+      );
+
+      const issue = result?.repository?.issue;
+      if (!issue) {
+        return null;
       }
+      type = issue.issueType?.name ?? null;
+
+      for (const node of issue.issueFieldValues?.nodes ?? []) {
+        const fieldName = node?.field?.name;
+        const optionName = node?.name;
+        if (fieldName && optionName) {
+          singleSelects.set(fieldName.toLowerCase(), optionName);
+        }
+      }
+
+      const pageInfo = issue.issueFieldValues?.pageInfo;
+      if (!pageInfo?.hasNextPage) {
+        return { type, singleSelects };
+      }
+      if (!pageInfo.endCursor) {
+        // More pages, but nothing to page with: the same unknown as a failed read.
+        core.warning(
+          'Issue field values report another page but no cursor to fetch it; ' +
+            'skipping the native type/priority checks rather than judging a partial read.'
+        );
+        return null;
+      }
+      after = pageInfo.endCursor;
     }
 
-    return { type: issue.issueType?.name ?? null, singleSelects };
+    core.warning(
+      `Issue field values did not end within ${MAX_FIELD_VALUE_PAGES} pages; ` +
+        'skipping the native type/priority checks rather than judging a partial read.'
+    );
+    return null;
   } catch (error) {
     core.warning(
       `Could not read native type/priority fields: ${error}. ` +
