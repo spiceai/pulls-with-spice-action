@@ -272,6 +272,21 @@ to OpenAI, with `spice_cloud_region` ignored. Give `ai_model` a bare OpenAI mode
     ai_model: 'gpt-5.4'
 ```
 
+## Releasing
+
+`dist/` is not committed to the branch — it is built onto the tag. Release by running
+the **Release** workflow (`workflow_dispatch`) with the version, e.g. `v2.1.0`:
+
+1. Lints, typechecks and builds the bundle, then runs it to confirm it loads.
+2. Commits `dist/` as a child of the released source commit and creates the version tag
+   there.
+3. Moves the floating major tag (`v2`) — skipped for prereleases.
+4. Publishes the GitHub Release.
+
+The version tag is created once, already containing a verified bundle, and is never
+moved afterwards; re-running with an existing version is refused. Only the major tag
+floats.
+
 ### Getting a Spice Cloud API Key
 
 1. Sign up at [spice.ai](https://spice.ai)

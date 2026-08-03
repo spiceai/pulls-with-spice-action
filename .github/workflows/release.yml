@@ -1,61 +1,118 @@
 name: Release
 
+# Publishing is driven from here rather than from `release: published`.
+#
+# `dist/` is not committed to the branch, so a tag is only usable once the bundle has
+# been built onto it. Building *after* a release is published inverts that: the tag goes
+# live naming an entry point that does not exist yet, stays broken if the build fails,
+# and the exact-version tag has to be force-moved afterwards — which is both a poor
+# provenance story and something tag protection can simply reject.
+#
+# So the order is: build, verify the bundle runs, create the version tag once at the
+# commit that contains it, and only then publish the release. A version tag is never
+# moved; only the floating major tag is.
 on:
-  release:
-    types:
-      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. v2.1.0'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as a prerelease (does not move the major tag)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
+          # Tags are needed to tell an existing version tag from a new one.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
-      - run: npm ci
-
-      - run: npm run build
-
-      - name: Commit dist and update release tags
-        shell: bash
-        # Passed through the environment rather than interpolated into the script.
-        # `${{ }}` is substituted before bash parses the line, and git permits `$`,
-        # backtick, `(`, `)`, `;` and `|` in a tag name — so an interpolated tag is a
-        # command, not a string.
+      - name: Validate the requested version
         env:
-          VERSION: ${{ github.event.release.tag_name }}
-          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          VERSION: ${{ inputs.version }}
         run: |
           if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
-            echo "Refusing to build release from tag '$VERSION': not a semver tag." >&2
+            echo "Refusing to release '$VERSION': expected vX.Y.Z or vX.Y.Z-suffix." >&2
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "Refusing to release '$VERSION': that tag already exists and version tags are immutable." >&2
             exit 1
           fi
 
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - name: Verify the bundle runs
+        # A tag that names a bundle Node cannot load is worse than no tag. With no event
+        # payload the action should reject the event — reaching that message means the
+        # bundle resolved every import and executed.
+        run: |
+          test -f dist/index.js
+          output="$(node dist/index.js 2>&1 || true)"
+          if ! grep -q 'pull requests and issues' <<<"$output"; then
+            echo "Built bundle did not run as expected:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+
+      - name: Tag the release
+        env:
+          VERSION: ${{ inputs.version }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
 
+          # dist/ is gitignored on the branch and committed only onto the tag. The commit
+          # is a direct child of the released source commit, which stays reachable.
           git add -f dist/
-          git commit -m "Build $VERSION" || echo "No changes to commit"
+          git commit -m "Build $VERSION"
 
-          # Update the tag to include dist
-          git tag -fa "$VERSION" -m "$VERSION"
-          git push origin "$VERSION" --force
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "refs/tags/$VERSION"
 
-          # Update major version tag only for stable semver release tags (e.g., v2.3.1 -> v2)
+          # The major tag floats by design — `@v2` is meant to follow the newest v2.
+          # Prereleases are excluded so `@v2` never points at one.
           if [[ "$IS_PRERELEASE" == "true" ]]; then
-            echo "Skipping major tag update for prerelease: $VERSION"
+            echo "Prerelease $VERSION: leaving the major tag where it is."
           elif [[ "$VERSION" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
             MAJOR="v${BASH_REMATCH[1]}"
-            git tag -fa "$MAJOR" -m "Update $MAJOR tag to $VERSION"
-            git push origin "$MAJOR" --force
-          else
-            echo "Skipping major tag update: tag '$VERSION' is not stable semver (vX.Y.Z)."
+            git tag -fa "$MAJOR" -m "Update $MAJOR to $VERSION"
+            git push origin "refs/tags/$MAJOR" --force
           fi
+
+      - name: Publish the release
+        env:
+          VERSION: ${{ inputs.version }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            flags+=(--prerelease)
+          fi
+
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --generate-notes \
+            "${flags[@]}"
