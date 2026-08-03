@@ -293,7 +293,7 @@ to OpenAI, with `spice_cloud_region` ignored. Give `ai_model` a bare OpenAI mode
 ## Releasing
 
 `dist/` is not committed to the branch — it is built onto the tag. Release by running
-the **Release** workflow (`workflow_dispatch`) with the version, e.g. `v3.1.0`:
+the **Release** workflow (`workflow_dispatch`) with the version, e.g. `v3.0.0`:
 
 1. Lints, typechecks and builds the bundle, then runs it to confirm it loads.
 2. Commits `dist/` as a child of the released source commit and creates the version tag
