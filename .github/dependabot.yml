@@ -1,0 +1,42 @@
+version: 2
+
+updates:
+  # dist/ is not committed, so a dependency bump alone cannot ship a stale bundle: the
+  # release workflow rebuilds from the lockfile on the tag.
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 5
+    labels:
+      - 'kind/dependencies'
+    commit-message:
+      prefix: 'deps'
+      prefix-development: 'deps-dev'
+    groups:
+      # One PR per ecosystem rather than per package. The runtime deps land in the
+      # published bundle and the dev deps do not, so they stay separate.
+      runtime:
+        dependency-type: 'production'
+        update-types:
+          - 'minor'
+          - 'patch'
+      development:
+        dependency-type: 'development'
+        update-types:
+          - 'minor'
+          - 'patch'
+
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    labels:
+      - 'kind/dependencies'
+      - 'area/ci'
+    commit-message:
+      prefix: 'deps'
+    groups:
+      actions:
+        patterns:
+          - '*'

@@ -65,6 +65,16 @@ const AILabelAnalysisSchema = z.object({
 
 type AILabelAnalysis = z.infer<typeof AILabelAnalysisSchema>;
 
+/**
+ * `ai_model` is passed to the endpoint verbatim, and on Spice Cloud a model is named by
+ * whatever the spicepod calls it — `openai` is the conventional name for the default
+ * OpenAI model. Callers going direct to OpenAI set a real model id instead.
+ */
+const DEFAULT_AI_MODEL = 'openai';
+
+const AI_LABELING_SYSTEM_PROMPT =
+  'You review the labels on GitHub pull requests and correct them.';
+
 const PR_COMMENT_TITLE = 'Pull with Spice';
 
 // Security: Maximum lengths to prevent DoS via extremely long inputs
@@ -73,6 +83,15 @@ const MAX_BODY_LENGTH = 65536;
 const MAX_LABEL_NAME_LENGTH = 100;
 const MAX_LABELS_COUNT = 100;
 const MAX_CHANGED_FILES = 3000;
+/** Pages of `issueFieldValues` read before giving up — see `fetchNativeFields`. */
+const MAX_FIELD_VALUE_PAGES = 10;
+/**
+ * The model's reasoning is quoted verbatim into the PR comment, which GitHub caps at
+ * 65536 characters in total. Keep it to a paragraph so it cannot crowd out the checks.
+ */
+const MAX_AI_REASONING_LENGTH = 2000;
+/** Changed files listed in the AI prompt. Enough to characterize a PR without paying for the tail. */
+const MAX_AI_PROMPT_FILES = 50;
 // Collect errors and success messages
 const errorMessages: string[] = [];
 const successMessages: string[] = [];
@@ -91,15 +110,18 @@ function sanitizeString(input: string | undefined, maxLength: number): string {
 
 async function run(): Promise<void> {
   try {
-    // Get details from context - pull request only
-    const pullRequest = github.context.payload.pull_request as
-      | ContentObject
-      | undefined;
+    // Accept either a pull request or an issue. Everything below except the
+    // file-based checks (size labelling, path-based labels) is an issue-level concept
+    // that applies equally to both, and GitHub's native type/priority fields exist
+    // *only* on issues — so restricting this action to PRs would make those checks
+    // unreachable.
+    const pullRequest = (github.context.payload.pull_request ??
+      github.context.payload.issue) as ContentObject | undefined;
+    const isIssue = !github.context.payload.pull_request;
 
-    // If no PR in the context, this might be another event
     if (!pullRequest) {
       core.setFailed(
-        'This action only works on pull requests. No pull request found in the context.',
+        'This action works on pull requests and issues. Neither was found in the event payload.',
       );
       return;
     }
@@ -118,15 +140,10 @@ async function run(): Promise<void> {
 
     // Determine which features need file data (optimization: only fetch if needed)
     const autoLabelEnabled = core.getInput('auto_label') === 'true';
-    const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
 
     // Get changed files for auto-labeling (if enabled)
     let changedFiles: ChangedFile[] = [];
-    if (
-      octokit &&
-      pullRequest.number &&
-      (autoLabelEnabled || autoLabelSizeEnabled)
-    ) {
+    if (octokit && pullRequest.number && !isIssue && autoLabelEnabled) {
       changedFiles = await getChangedFiles(octokit, pullRequest.number);
     }
 
@@ -137,6 +154,11 @@ async function run(): Promise<void> {
 
     // AI-powered auto-labeling (if enabled and Spice API key provided)
     const spiceApiKey = core.getInput('spice_api_key');
+    if (spiceApiKey) {
+      // Actions masks its own secrets, but the key can also arrive from a variable or a
+      // literal. Register it so a provider error that quotes the request cannot print it.
+      core.setSecret(spiceApiKey);
+    }
     const aiAutoLabelEnabled = core.getInput('ai_auto_label') === 'true';
     if (octokit && pullRequest.number && spiceApiKey && aiAutoLabelEnabled) {
       await performAIAutoLabeling(
@@ -148,20 +170,25 @@ async function run(): Promise<void> {
     }
 
     // Auto-assign (if enabled)
+    let didAutoAssign = false;
     if (octokit && pullRequest.number) {
-      await performAutoAssign(octokit, pullRequest);
+      didAutoAssign = await performAutoAssign(octokit, pullRequest);
     }
 
-    // Refresh labels after auto-labeling (only if we made changes)
-    const needsRefresh =
-      autoAppliedLabels.length > 0 || core.getInput('auto_assign') === 'true';
+    // Re-read the PR if we changed anything on it, so the checks below evaluate the
+    // current state. This keyed off `auto_assign` before, which meant an author
+    // assignment made via `auto_assign_author` left `pullRequest.assignees` stale and
+    // `checkAssignees` failed a PR the action had just assigned.
+    const needsRefresh = autoAppliedLabels.length > 0 || didAutoAssign;
     if (octokit && pullRequest.number && needsRefresh) {
-      const freshPR = await octokit.rest.pulls.get({
+      // `issues.get` serves both — a PR is an issue — and unlike `pulls.get` it also
+      // works when this action runs on an issue event.
+      const fresh = await octokit.rest.issues.get({
         ...github.context.repo,
-        pull_number: pullRequest.number,
+        issue_number: pullRequest.number,
       });
-      pullRequest.labels = freshPR.data.labels as Label[];
-      pullRequest.assignees = freshPR.data.assignees as User[];
+      pullRequest.labels = fresh.data.labels as Label[];
+      pullRequest.assignees = fresh.data.assignees as User[];
     }
 
     // Run all the quality checks
@@ -175,13 +202,25 @@ async function run(): Promise<void> {
     checkMilestone(pullRequest);
     checkBranchNaming(pullRequest);
 
+    // Native GitHub type / priority fields (issues only — see checkNativeFields)
+    if (octokit && pullRequest.number) {
+      await checkNativeFields(octokit, pullRequest.number, isIssue);
+    }
+
     // Post the report to the PR with all messages (errors and success)
     await postReportToPullRequest(errorMessages, successMessages);
 
     // If we have any errors, fail the action
     if (errorMessages.length > 0) {
+      // Name the failing requirements in the failure itself. Previously every failure
+      // read "See PR comments for details", so the run log was identical whether a PR
+      // was missing a label, an assignee, or a milestone — anyone triaging a red check
+      // had to open the PR to learn what it wanted.
+      for (const message of errorMessages) {
+        core.error(message);
+      }
       core.setFailed(
-        'Pull request checks failed. See PR comments for details.',
+        `Pull request checks failed (${errorMessages.length}): ${errorMessages.join(' | ')}`,
       );
       return;
     }
@@ -212,15 +251,17 @@ async function postReportToPullRequest(
     const octokit = github.getOctokit(token);
     const context = github.context;
 
-    // Make sure we have a PR number
-    if (!context.payload.pull_request?.number) {
+    // Works for issues as well as pull requests — the comment endpoints are the same,
+    // and without this the action would run its checks on an issue but silently post
+    // nothing.
+    const prNumber =
+      context.payload.pull_request?.number ?? context.payload.issue?.number;
+    if (!prNumber) {
       core.warning(
-        'Could not find pull request number in context. Unable to post comments.',
+        'Could not find a pull request or issue number in context. Unable to post comments.',
       );
       return;
     }
-
-    const prNumber = context.payload.pull_request.number;
 
     // Format the comment message
     const statusHeader =
@@ -291,7 +332,7 @@ async function postReportToPullRequest(
     // Look for an existing comment from the action by checking the header pattern
     const botComment = comments.data.find(
       (comment: { body?: string | null; id: number }) =>
-      comment.body?.includes(PR_COMMENT_TITLE),
+        comment.body?.includes(PR_COMMENT_TITLE),
     );
 
     if (botComment) {
@@ -607,10 +648,9 @@ async function performAutoLabeling(
   changedFiles: ChangedFile[],
 ): Promise<void> {
   const autoLabelEnabled = core.getInput('auto_label') === 'true';
-  const autoLabelSizeEnabled = core.getInput('auto_label_size') === 'true';
   const autoLabelTypeEnabled = core.getInput('auto_label_type') === 'true';
 
-  if (!autoLabelEnabled && !autoLabelSizeEnabled && !autoLabelTypeEnabled) {
+  if (!autoLabelEnabled && !autoLabelTypeEnabled) {
     return;
   }
 
@@ -656,7 +696,10 @@ async function performAutoLabeling(
   for (const rule of builtInRules) {
     for (const file of changedFiles) {
       if (rule.paths.some((path) => file.filename.includes(path))) {
-        const sanitizedLabel = sanitizeString(rule.label, MAX_LABEL_NAME_LENGTH);
+        const sanitizedLabel = sanitizeString(
+          rule.label,
+          MAX_LABEL_NAME_LENGTH,
+        );
         if (isKindLabel(sanitizedLabel)) {
           // Keep a single path-based kind label candidate.
           if (!pathBasedKindLabel) {
@@ -667,23 +710,6 @@ async function performAutoLabeling(
         }
         break;
       }
-    }
-  }
-
-  // Size-based labeling
-  if (autoLabelSizeEnabled && changedFiles.length > 0) {
-    const totalChanges = changedFiles.reduce(
-      (sum, file) => sum + file.additions + file.deletions,
-      0,
-    );
-    const sizeLabel = getSizeLabel(totalChanges);
-    if (sizeLabel) {
-      // Remove any existing size labels from our set
-      const sizeLabels = ['size/xs', 'size/s', 'size/m', 'size/l', 'size/xl'];
-      for (const sl of sizeLabels) {
-        labelsToAdd.delete(sl);
-      }
-      labelsToAdd.add(sizeLabel);
     }
   }
 
@@ -730,14 +756,6 @@ async function performAutoLabeling(
   }
 }
 
-function getSizeLabel(totalChanges: number): string {
-  if (totalChanges < 11) return 'size/xs';
-  if (totalChanges < 101) return 'size/s';
-  if (totalChanges < 501) return 'size/m';
-  if (totalChanges < 2000) return 'size/l';
-  return 'size/xl';
-}
-
 function getTypeLabelFromTitle(title: string): string | null {
   const conventionalCommitRegex = /^(\w+)(?:\([^)]+\))?!?:/;
   const match = title.match(conventionalCommitRegex);
@@ -780,10 +798,25 @@ async function performAIAutoLabeling(
   try {
     core.info('Performing AI-powered auto-labeling refinement...');
 
-    const currentLabels = (pullRequest.labels || []).map((l) => l.name);
+    // The rule-based pass just ran and its labels are not yet reflected on
+    // `pullRequest`. Reviewing the stale list would leave the AI unable to remove a
+    // label the rule-based pass had wrongly applied moments earlier — the single case
+    // this pass exists to catch.
+    const currentLabels = [
+      ...new Set([
+        ...(pullRequest.labels || []).map((l) => l.name),
+        ...autoAppliedLabels,
+      ]),
+    ];
 
     // Fetch available labels from the repository
     const repoLabels = await getRepositoryLabels(octokit);
+    if (repoLabels.length === 0) {
+      core.info(
+        'No repository labels available; skipping AI label review. (See preceding warnings if the label fetch failed.)',
+      );
+      return;
+    }
 
     // Build the prompt for the LLM, including current labels for refinement
     const prompt = buildAILabelingPrompt(
@@ -793,11 +826,9 @@ async function performAIAutoLabeling(
       currentLabels,
     );
 
-    // Call Spice Cloud LLM endpoint with structured output
-    const analysis = await callSpiceLLM(spiceApiKey, prompt);
+    const analysis = await callLabelingModel(spiceApiKey, prompt);
 
     if (!analysis) {
-      core.info('AI analysis returned no response');
       aiAnalysisResults.push('AI analysis could not be completed.');
       return;
     }
@@ -807,41 +838,46 @@ async function performAIAutoLabeling(
       aiAnalysisResults.push(`**Reasoning:** ${analysis.reasoning}`);
     }
 
-    let labelsToAdd = analysis.labelsToAdd.filter(
-      (label: string) => !currentLabels.includes(label),
+    // `addLabels` *creates* a label that does not exist yet, so an invented name would
+    // silently add it to the repository's label set rather than fail. Only names the
+    // prompt actually offered are allowed through.
+    const knownLabels = new Set(repoLabels);
+    const invented = analysis.labelsToAdd.filter(
+      (label) => !knownLabels.has(label),
     );
-    const labelsToRemove = analysis.labelsToRemove.filter((label: string) =>
-      currentLabels.includes(label),
-    );
-
-    const aiKindLabelsToAdd = labelsToAdd.filter((label) => isKindLabel(label));
-    if (aiKindLabelsToAdd.length > 1) {
-      const preferredKindLabel = aiKindLabelsToAdd[0];
-      labelsToAdd = labelsToAdd.filter(
-        (label) => !isKindLabel(label) || label === preferredKindLabel,
-      );
-      core.info(
-        `AI suggested multiple kind labels. Keeping only: ${preferredKindLabel}`,
+    if (invented.length > 0) {
+      core.warning(
+        `Ignoring AI-suggested labels that do not exist in this repository: ${formatListWithBackticks(invented)}`,
       );
     }
 
-    const currentKindLabels = currentLabels.filter((label) => isKindLabel(label));
-    const removedKindLabels = labelsToRemove.filter((label) =>
-      isKindLabel(label),
+    let labelsToAdd = analysis.labelsToAdd.filter(
+      (label) => knownLabels.has(label) && !currentLabels.includes(label),
     );
-    const remainingKindLabels = currentKindLabels.filter(
-      (label) => !removedKindLabels.includes(label),
+    const labelsToRemove = analysis.labelsToRemove.filter((label) =>
+      currentLabels.includes(label),
     );
-    const kindLabelToAdd = labelsToAdd.find((label) => isKindLabel(label));
 
-    if (
-      kindLabelToAdd &&
-      remainingKindLabels.length > 0 &&
-      !remainingKindLabels.includes(kindLabelToAdd)
-    ) {
-      labelsToAdd = labelsToAdd.filter((label) => label !== kindLabelToAdd);
+    // Keep `kind/` mutually exclusive, the same rule the rule-based pass follows. Any
+    // kind label the AI is not removing stays, so it wins over an addition; otherwise
+    // the first suggested one is taken and the rest dropped.
+    const survivingKindLabel = currentLabels.find(
+      (label) => isKindLabel(label) && !labelsToRemove.includes(label),
+    );
+    const kindLabelsToAdd = labelsToAdd.filter(isKindLabel);
+    const acceptedKindLabel = survivingKindLabel
+      ? undefined
+      : kindLabelsToAdd[0];
+    const rejectedKindLabels = kindLabelsToAdd.filter(
+      (label) => label !== acceptedKindLabel,
+    );
+    if (rejectedKindLabels.length > 0) {
+      labelsToAdd = labelsToAdd.filter(
+        (label) => !rejectedKindLabels.includes(label),
+      );
       core.info(
-        `Skipping AI kind label "${kindLabelToAdd}" because pull request already has kind label(s): ${remainingKindLabels.join(', ')}`,
+        `Dropping AI kind label(s) ${formatListWithBackticks(rejectedKindLabels)} to keep a single kind label` +
+          (survivingKindLabel ? `; keeping \`${survivingKindLabel}\`` : ''),
       );
     }
 
@@ -860,7 +896,7 @@ async function performAIAutoLabeling(
         }
       }
       aiAnalysisResults.push(
-        `**Labels removed by AI:** ${labelsToRemove.map((l: string) => `\`${l}\``).join(', ')}`,
+        `**Labels removed by AI:** ${formatListWithBackticks(labelsToRemove)}`,
       );
     }
 
@@ -872,9 +908,11 @@ async function performAIAutoLabeling(
           issue_number: pullRequest.number,
           labels: labelsToAdd,
         });
-        autoAppliedLabels.push(...labelsToAdd.map((l: string) => `${l} (AI)`));
+        // Plain label names: `autoAppliedLabels` also drives the post-labelling refresh
+        // in `run()`, so it must not carry display decoration.
+        autoAppliedLabels.push(...labelsToAdd);
         aiAnalysisResults.push(
-          `**Labels added by AI:** ${labelsToAdd.map((l: string) => `\`${l}\``).join(', ')}`,
+          `**Labels added by AI:** ${formatListWithBackticks(labelsToAdd)}`,
         );
         core.info(`AI added labels: ${labelsToAdd.join(', ')}`);
       } catch (error) {
@@ -903,9 +941,10 @@ function buildAILabelingPrompt(
   currentLabels: string[],
 ): string {
   const filesSummary = changedFiles
-    .slice(0, 50) // Limit to first 50 files to keep prompt manageable
+    .slice(0, MAX_AI_PROMPT_FILES)
     .map((f) => `- ${f.filename} (+${f.additions}/-${f.deletions})`)
     .join('\n');
+  const omittedFiles = Math.max(0, changedFiles.length - MAX_AI_PROMPT_FILES);
 
   return `Review and refine the labels on this GitHub pull request.
 
@@ -920,7 +959,7 @@ ${pullRequest.body || 'No description provided'}
 
 **Changed Files (${changedFiles.length} total):**
 ${filesSummary}
-${changedFiles.length > 50 ? `\n... and ${changedFiles.length - 50} more files` : ''}
+${omittedFiles > 0 ? `\n... and ${omittedFiles} more files` : ''}
 
 ## Currently Applied Labels
 ${currentLabels.length > 0 ? currentLabels.map((l) => `- ${l}`).join('\n') : 'No labels currently applied'}
@@ -938,14 +977,25 @@ Review the currently applied labels and suggest improvements:
 Be conservative - only suggest changes you are confident about. If the current labels are appropriate, return empty arrays.`;
 }
 
-function getSpiceCloudBaseUrl(region: string): string {
-  // Map region to Spice Cloud HTTP data endpoints for OpenAI-compatible APIs.
-  const regionEndpoints: Record<string, string> = {
-    'us-east-1': 'https://us-east-1-prod-aws-data.spiceai.io/v1',
-    'us-west-2': 'https://us-west-2-prod-aws-data.spiceai.io/v1',
-  };
+/** Spice Cloud HTTP data endpoints, which serve the OpenAI-compatible API. */
+const SPICE_CLOUD_ENDPOINTS: Record<string, string> = {
+  'us-east-1': 'https://us-east-1-prod-aws-data.spiceai.io/v1',
+  'us-west-2': 'https://us-west-2-prod-aws-data.spiceai.io/v1',
+};
+const DEFAULT_SPICE_CLOUD_REGION = 'us-east-1';
 
-  return regionEndpoints[region] ?? regionEndpoints['us-east-1'];
+function getSpiceCloudBaseUrl(region: string): string {
+  const endpoint = SPICE_CLOUD_ENDPOINTS[region];
+  if (endpoint) {
+    return endpoint;
+  }
+
+  core.warning(
+    `Unknown Spice Cloud region "${region}". Known regions: ${formatListWithBackticks(
+      Object.keys(SPICE_CLOUD_ENDPOINTS),
+    )}. Falling back to ${DEFAULT_SPICE_CLOUD_REGION}.`,
+  );
+  return SPICE_CLOUD_ENDPOINTS[DEFAULT_SPICE_CLOUD_REGION] as string;
 }
 
 function isOpenAIKey(apiKey: string): boolean {
@@ -953,21 +1003,23 @@ function isOpenAIKey(apiKey: string): boolean {
   return apiKey.startsWith('sk-');
 }
 
-function sanitizeAILabelAnalysis(
-  analysis: AILabelAnalysis,
-): AILabelAnalysis {
-  const sanitizedLabelsToAdd = analysis.labelsToAdd
-    .map((label: string) => sanitizeString(label, MAX_LABEL_NAME_LENGTH))
-    .filter((label: string) => label.length > 0);
+/**
+ * Bounds a model-supplied label list. Nothing about the response is trusted: the model
+ * is free to answer with a thousand labels or a label built from a megabyte of text, and
+ * each entry becomes an API call and a line in the PR comment.
+ */
+function sanitizeLabelList(labels: string[]): string[] {
+  return labels
+    .map((label) => sanitizeString(label, MAX_LABEL_NAME_LENGTH).trim())
+    .filter((label) => label.length > 0)
+    .slice(0, MAX_LABELS_COUNT);
+}
 
-  const sanitizedLabelsToRemove = analysis.labelsToRemove
-    .map((label: string) => sanitizeString(label, MAX_LABEL_NAME_LENGTH))
-    .filter((label: string) => label.length > 0);
-
+function sanitizeAILabelAnalysis(analysis: AILabelAnalysis): AILabelAnalysis {
   return {
-    labelsToAdd: sanitizedLabelsToAdd,
-    labelsToRemove: sanitizedLabelsToRemove,
-    reasoning: sanitizeString(analysis.reasoning, MAX_BODY_LENGTH),
+    labelsToAdd: sanitizeLabelList(analysis.labelsToAdd),
+    labelsToRemove: sanitizeLabelList(analysis.labelsToRemove),
+    reasoning: sanitizeString(analysis.reasoning, MAX_AI_REASONING_LENGTH),
   };
 }
 
@@ -996,130 +1048,299 @@ function parseAILabelAnalysisFromText(text: string): AILabelAnalysis | null {
   return null;
 }
 
-async function callSpiceLLM(
+/**
+ * Describes a failed model call without reproducing the request that caused it.
+ *
+ * AI SDK errors carry the outgoing request on `requestBodyValues`/`responseHeaders`, and
+ * the provider is authenticated with the caller's API key — serializing the whole error,
+ * as this did while the Spice endpoint was being brought up, prints that key into a log
+ * `core.setSecret` never saw and cannot mask.
+ */
+function describeModelError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return 'unknown error';
+  }
+  const statusCode = (error as { statusCode?: number }).statusCode;
+  const status = statusCode ? ` (status ${statusCode})` : '';
+  return `${error.message || error.name}${status}`;
+}
+
+/**
+ * Asks the configured model to review the PR's labels.
+ *
+ * Returns null on any failure — an unreachable endpoint, a refusal, a reply that is not
+ * the JSON we asked for. Labelling is an assist, so a bad answer must degrade to the
+ * rule-based labels rather than fail the PR.
+ */
+async function callLabelingModel(
   apiKey: string,
   prompt: string,
 ): Promise<AILabelAnalysis | null> {
+  const modelName = core.getInput('ai_model') || DEFAULT_AI_MODEL;
+
   try {
-    const region = core.getInput('spice_cloud_region') || 'us-east-1';
-    const modelInput = core.getInput('ai_model') || 'openai/gpt-5.4';
+    // An `sk-` key is an OpenAI key, not a Spice Cloud one. Sending it to Spice Cloud
+    // would just 401, so honour it directly and skip the region entirely.
+    if (isOpenAIKey(apiKey)) {
+      core.info(`Calling OpenAI directly with model "${modelName}"`);
 
-    // Determine if we're using OpenAI directly or Spice Cloud
-    const useOpenAIDirect = isOpenAIKey(apiKey);
-
-    if (useOpenAIDirect) {
-      let model = modelInput;
-
-      // If model doesn't include a slash (e.g., 'openai'), use a sensible default
-      if (!model.includes('/')) {
-        model = model || 'gpt-5.4';
-      } else {
-        // Extract model name from 'provider/model' format
-        model = model.split('/').pop() || 'gpt-5.4';
-      }
-      core.info(`Using OpenAI directly with model: ${model}`);
-
-      // Use native OpenAI provider for better structured output support
-      const openai = createOpenAI({
-        apiKey: apiKey,
-      });
+      // The native OpenAI provider supports strict structured output, so the schema is
+      // enforced by the API rather than parsed back out of prose.
       const { output } = await generateText({
-        model: openai(model),
-        output: Output.object({
-          schema: AILabelAnalysisSchema,
-        }),
-        system:
-          'You are a helpful assistant that analyzes pull requests and suggests appropriate labels. Respond with JSON.',
-        prompt: prompt,
+        model: createOpenAI({ apiKey })(modelName),
+        output: Output.object({ schema: AILabelAnalysisSchema }),
+        system: AI_LABELING_SYSTEM_PROMPT,
+        prompt,
       });
 
-      if (!output) {
-        core.warning('AI analysis returned no structured output');
+      return output ? sanitizeAILabelAnalysis(output) : null;
+    }
+
+    const region =
+      core.getInput('spice_cloud_region') || DEFAULT_SPICE_CLOUD_REGION;
+    const baseURL = getSpiceCloudBaseUrl(region);
+    core.info(
+      `Calling Spice Cloud model "${modelName}" in ${region} (${baseURL})`,
+    );
+
+    const provider = createOpenAICompatible({
+      name: 'spice-cloud',
+      apiKey,
+      baseURL,
+      headers: { 'X-API-Key': apiKey },
+    });
+
+    // Models served through Spice Cloud do not all honour `response_format`, so ask for
+    // JSON in the prompt and validate what comes back instead of relying on the API.
+    const { text } = await generateText({
+      model: provider(modelName),
+      system: `${AI_LABELING_SYSTEM_PROMPT} Return only valid JSON of the form {"labelsToAdd": string[], "labelsToRemove": string[], "reasoning": string}.`,
+      prompt,
+    });
+
+    const parsed = parseAILabelAnalysisFromText(text);
+    if (!parsed) {
+      core.warning(
+        `Model "${modelName}" did not return the expected JSON; leaving labels unchanged.`,
+      );
+      return null;
+    }
+
+    return sanitizeAILabelAnalysis(parsed);
+  } catch (error) {
+    core.warning(
+      `Model "${modelName}" could not be reached: ${describeModelError(error)}`,
+    );
+    return null;
+  }
+}
+
+// ============================================================================
+// Native GitHub Type / Priority Fields
+// ============================================================================
+
+interface NativeFields {
+  type: string | null;
+  /** Single-select field values, keyed by field name (e.g. "Priority" -> "P1"). */
+  singleSelects: Map<string, string>;
+}
+
+/** One page of the `fetchNativeFields` GraphQL response. */
+interface NativeFieldsQuery {
+  repository?: {
+    issue?: {
+      issueType?: { name?: string } | null;
+      issueFieldValues?: {
+        pageInfo?: {
+          hasNextPage?: boolean | null;
+          endCursor?: string | null;
+        } | null;
+        nodes?: Array<{
+          __typename?: string;
+          name?: string | null;
+          field?: { name?: string | null } | null;
+        } | null> | null;
+      } | null;
+    } | null;
+  } | null;
+}
+
+/**
+ * Reads GitHub's *native* issue type and issue field values.
+ *
+ * These replace the older convention of encoding type and priority in labels, so a
+ * repository using them no longer needs `kind/*` or `priority/*` labels to carry the
+ * same information.
+ *
+ * Only available over GraphQL, and only on issues: the `PullRequest` GraphQL type
+ * exposes neither `issueType` nor `issueFieldValues`. Returns null when the data cannot
+ * be read, which callers treat as "cannot evaluate" rather than "requirement not met" —
+ * failing a PR because a token lacked a scope would be a false positive.
+ */
+async function fetchNativeFields(
+  octokit: ReturnType<typeof github.getOctokit>,
+  issueNumber: number,
+): Promise<NativeFields | null> {
+  const query = `
+    query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          issueType { name }
+          issueFieldValues(first: 50, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              __typename
+              ... on IssueFieldSingleSelectValue {
+                name
+                field {
+                  ... on IssueFieldSingleSelect { name }
+                }
+              }
+            }
+          }
+        }
+      }
+    }`;
+
+  try {
+    const singleSelects = new Map<string, string>();
+    let type: string | null = null;
+    let after: string | null = null;
+
+    // Paged, because a field that exists but sits past the page read is
+    // indistinguishable from one that was never set — and the caller reads a
+    // missing field as "requirement not met". One page covers every issue in
+    // practice; the cap only bounds a runaway, and reaching it returns null
+    // ("cannot evaluate") rather than a map that is quietly incomplete.
+    for (let page = 0; page < MAX_FIELD_VALUE_PAGES; page++) {
+      // Annotated rather than inferred: `after` is assigned from this response
+      // and passed back into the next request, and an inferred `result` would
+      // make that loop-carried cursor circular (TS7022).
+      const result: NativeFieldsQuery =
+        await octokit.graphql<NativeFieldsQuery>(query, {
+          ...github.context.repo,
+          number: issueNumber,
+          after,
+        });
+
+      const issue = result?.repository?.issue;
+      if (!issue) {
         return null;
       }
+      type = issue.issueType?.name ?? null;
 
-      return sanitizeAILabelAnalysis(output);
-    }
-
-    const knownSpiceRegions = ['us-east-1', 'us-west-2'];
-    if (!knownSpiceRegions.includes(region)) {
-      core.warning(`Unknown Spice region "${region}". Falling back to us-east-1.`);
-    }
-    const baseURL = getSpiceCloudBaseUrl(region);
-
-    const modelCandidates = modelInput.includes('/')
-      ? [modelInput, modelInput.split('/')[0] || 'openai']
-      : [modelInput];
-    if (!modelCandidates.includes('openai')) {
-      modelCandidates.push('openai');
-    }
-
-    let lastError: unknown = null;
-
-    for (const candidateModel of modelCandidates) {
-      core.info(
-        `Using Spice Cloud region: ${region}, model: ${candidateModel}, base URL: ${baseURL}`,
-      );
-
-      try {
-        const provider = createOpenAICompatible({
-          name: 'spice-cloud',
-          apiKey: apiKey,
-          baseURL: baseURL,
-          headers: {
-            'X-API-Key': apiKey,
-          },
-        });
-
-        // Some Spice-hosted models may not support response_format strictly,
-        // so request JSON text and validate it ourselves.
-        const { text } = await generateText({
-          model: provider(candidateModel),
-          system:
-            'You analyze pull requests and suggest labels. Return only valid JSON with this exact shape: {"labelsToAdd": string[], "labelsToRemove": string[], "reasoning": string}.',
-          prompt: prompt,
-        });
-
-        const parsed = parseAILabelAnalysisFromText(text);
-        if (!parsed) {
-          core.warning(
-            `AI analysis returned non-JSON output from Spice model "${candidateModel}"`,
-          );
-          core.info(`Raw AI response preview: ${text.slice(0, 500)}`);
-          continue;
+      for (const node of issue.issueFieldValues?.nodes ?? []) {
+        const fieldName = node?.field?.name;
+        const optionName = node?.name;
+        if (fieldName && optionName) {
+          singleSelects.set(fieldName.toLowerCase(), optionName);
         }
-
-        return sanitizeAILabelAnalysis(parsed);
-      } catch (error) {
-        lastError = error;
-        const err = error as Error & { statusCode?: number };
-        const statusSuffix = err.statusCode
-          ? ` (status ${err.statusCode})`
-          : '';
-        core.warning(
-          `Spice AI call failed for model "${candidateModel}" at ${baseURL}${statusSuffix}: ${err.message || err.name}`,
-        );
       }
+
+      const pageInfo = issue.issueFieldValues?.pageInfo;
+      if (!pageInfo?.hasNextPage) {
+        return { type, singleSelects };
+      }
+      if (!pageInfo.endCursor) {
+        // More pages, but nothing to page with: the same unknown as a failed read.
+        core.warning(
+          'Issue field values report another page but no cursor to fetch it; ' +
+            'skipping the native type/priority checks rather than judging a partial read.',
+        );
+        return null;
+      }
+      after = pageInfo.endCursor;
     }
 
-    if (lastError instanceof Error) {
-      core.warning(`Failed to call AI LLM: ${lastError.message}`);
-      core.info(`Full error details: ${lastError.stack}`);
-      core.info(
-        `Error payload: ${JSON.stringify(lastError, Object.getOwnPropertyNames(lastError))}`,
-      );
-    }
-
+    core.warning(
+      `Issue field values did not end within ${MAX_FIELD_VALUE_PAGES} pages; ` +
+        'skipping the native type/priority checks rather than judging a partial read.',
+    );
     return null;
   } catch (error) {
-    if (error instanceof Error) {
-      core.warning(`Failed to call AI LLM: ${error.message}`);
-      core.info(`Full error details: ${error.stack}`);
-      core.info(
-        `Error payload: ${JSON.stringify(error, Object.getOwnPropertyNames(error))}`,
-      );
-    }
+    core.warning(
+      `Could not read native type/priority fields: ${error}. ` +
+        'These checks need a token with `read:project`/issue read access on a repository ' +
+        'whose organization has issue types configured; skipping them rather than failing.',
+    );
     return null;
+  }
+}
+
+async function checkNativeFields(
+  octokit: ReturnType<typeof github.getOctokit>,
+  issueNumber: number,
+  isIssue: boolean,
+): Promise<void> {
+  const requireType = core.getInput('require_issue_type') === 'true';
+  const allowedTypes = getInputArray('allowed_issue_types');
+  const priorityForTypes = getInputArray('require_priority_for_types');
+  const priorityFieldName = core.getInput('priority_field_name') || 'Priority';
+
+  if (
+    !requireType &&
+    allowedTypes.length === 0 &&
+    priorityForTypes.length === 0
+  ) {
+    return; // Feature not enabled
+  }
+
+  // Pull requests have no native type or field values — enforcing them here would fail
+  // every PR for a property GitHub gives it no way to set. Say so once, clearly, rather
+  // than failing or silently doing nothing.
+  if (!isIssue) {
+    core.info(
+      'Skipping native type/priority checks: GitHub exposes these fields on issues only, not pull requests.',
+    );
+    return;
+  }
+
+  const fields = await fetchNativeFields(octokit, issueNumber);
+  if (!fields) {
+    return; // Already warned; do not fail on unreadable data
+  }
+
+  // --- Type -------------------------------------------------------------------
+  if (requireType && !fields.type) {
+    errorMessages.push(
+      getCustomErrorMessage('no_issue_type') ||
+        'This issue needs a type. Set it with the **Type** field in the sidebar.',
+    );
+  } else if (fields.type) {
+    if (
+      allowedTypes.length > 0 &&
+      !allowedTypes.some((t) => t.toLowerCase() === fields.type?.toLowerCase())
+    ) {
+      errorMessages.push(
+        getCustomErrorMessage('invalid_native_issue_type') ||
+          `Issue type \`${fields.type}\` is not one of the allowed types: ${formatListWithBackticks(allowedTypes)}.`,
+      );
+    } else {
+      successMessages.push(`Has issue type: \`${fields.type}\``);
+    }
+  }
+
+  // --- Priority ---------------------------------------------------------------
+  // Only required for the configured types (typically bugs), because triage urgency is
+  // meaningful for a defect and mostly noise for a chore.
+  if (priorityForTypes.length === 0 || !fields.type) {
+    return;
+  }
+  const needsPriority = priorityForTypes.some(
+    (t) => t.toLowerCase() === fields.type?.toLowerCase(),
+  );
+  if (!needsPriority) {
+    return;
+  }
+
+  const priority = fields.singleSelects.get(priorityFieldName.toLowerCase());
+  if (!priority) {
+    errorMessages.push(
+      getCustomErrorMessage('no_priority') ||
+        `A \`${fields.type}\` issue needs a **${priorityFieldName}**. Set the ${priorityFieldName} field in the sidebar.`,
+    );
+  } else {
+    successMessages.push(`Has ${priorityFieldName}: \`${priority}\``);
   }
 }
 
@@ -1127,22 +1348,35 @@ async function callSpiceLLM(
 // Auto-assign Functions
 // ============================================================================
 
+/**
+ * Assigns the PR author and/or a configured user list, when the PR has no assignees.
+ * Returns true if assignees were actually added, so the caller knows the PR's assignee
+ * list is now stale and must be re-read before `require_assignee` is evaluated.
+ */
 async function performAutoAssign(
   octokit: ReturnType<typeof github.getOctokit>,
   pullRequest: ContentObject,
-): Promise<void> {
+): Promise<boolean> {
+  const autoAssignees = getInputArray('auto_assign_users');
+  const assignAuthor = core.getInput('auto_assign_author') === 'true';
   const autoAssignEnabled = core.getInput('auto_assign') === 'true';
-  if (!autoAssignEnabled || !pullRequest.number) {
-    return;
+
+  // `auto_assign_author` and `auto_assign_users` each enable assignment on their own.
+  // They used to be gated behind `auto_assign`, which made the documented quick-start
+  // config (`auto_assign_author: 'true'` with `auto_assign` left at its `false` default)
+  // silently do nothing — and then fail the PR under `require_assignee` for having no
+  // assignee the action was asked to add. `auto_assign` remains supported as the
+  // umbrella switch so existing configs keep working.
+  const shouldAssign =
+    autoAssignEnabled || assignAuthor || autoAssignees.length > 0;
+  if (!shouldAssign || !pullRequest.number) {
+    return false;
   }
 
   // Check if already has assignees
   if (pullRequest.assignees && pullRequest.assignees.length > 0) {
-    return;
+    return false;
   }
-
-  const autoAssignees = getInputArray('auto_assign_users');
-  const assignAuthor = core.getInput('auto_assign_author') === 'true';
 
   const assigneesToAdd: string[] = [];
 
@@ -1156,19 +1390,35 @@ async function performAutoAssign(
 
   if (assigneesToAdd.length > 0) {
     try {
-      await octokit.rest.issues.addAssignees({
+      const response = await octokit.rest.issues.addAssignees({
         ...github.context.repo,
         issue_number: pullRequest.number,
         assignees: [...new Set(assigneesToAdd)],
       });
-      core.info(`Auto-assigned: ${assigneesToAdd.join(', ')}`);
+      // GitHub silently drops assignees it will not accept — App/bot accounts such as
+      // dependabot[bot], and users without repository access. The request still returns
+      // 201, so the only way to know whether anything was actually assigned is to read
+      // the assignee list back off the response.
+      const assigned = (response.data.assignees ?? []).map((a) => a.login);
+      if (assigned.length === 0) {
+        core.warning(
+          `Auto-assign was requested for ${formatListWithBackticks(assigneesToAdd)}, but GitHub accepted none of them. ` +
+            'This is expected for App/bot authors (for example `dependabot[bot]`), which cannot be assigned, ' +
+            'and for users without access to this repository.',
+        );
+        return false;
+      }
+      core.info(`Auto-assigned: ${assigned.join(', ')}`);
       successMessages.push(
-        `Auto-assigned: ${formatListWithBackticks(assigneesToAdd)}`,
+        `Auto-assigned: ${formatListWithBackticks(assigned)}`,
       );
+      return true;
     } catch (error) {
       core.warning(`Failed to auto-assign: ${error}`);
     }
   }
+
+  return false;
 }
 
 // ============================================================================

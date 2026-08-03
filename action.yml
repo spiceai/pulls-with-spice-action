@@ -34,6 +34,20 @@ inputs:
   required_issue_types:
     description: 'Pull request must include one of these issue types in conventional commit format (comma-separated)'
     required: false
+  require_issue_type:
+    description: "Require GitHub's native issue Type field to be set. Issues only — pull requests have no native type."
+    required: false
+    default: 'false'
+  allowed_issue_types:
+    description: "Restrict GitHub's native issue Type to these values (comma-separated, e.g. 'Bug,Feature,Task'). Issues only."
+    required: false
+  require_priority_for_types:
+    description: "Require a priority when the native issue Type is one of these (comma-separated, e.g. 'Bug'). Issues only."
+    required: false
+  priority_field_name:
+    description: 'Name of the native single-select issue field holding priority'
+    required: false
+    default: 'Priority'
   require_milestone:
     description: 'Whether to require a milestone on the pull request'
     required: false
@@ -43,10 +57,6 @@ inputs:
     required: false
   auto_label:
     description: 'Enable automatic labeling based on file paths and conventional commits'
-    required: false
-    default: 'false'
-  auto_label_size:
-    description: 'Automatically add size labels (size/xs, size/s, size/m, size/l, size/xl) based on changes'
     required: false
     default: 'false'
   auto_label_type:
@@ -68,20 +78,20 @@ inputs:
     description: 'JSON object with custom error messages for various checks'
     required: false
   spice_api_key:
-    description: 'Spice Cloud API Key for AI-powered features'
+    description: "Spice Cloud API key for AI-powered features. A key starting with 'sk-' is treated as an OpenAI key and used against OpenAI directly."
     required: false
   spice_cloud_region:
-    description: 'Spice Cloud region (e.g., us-east-1, us-west-2)'
+    description: 'Spice Cloud region: us-east-1 or us-west-2. Ignored when using an OpenAI key.'
     required: false
     default: 'us-east-1'
   ai_auto_label:
-    description: 'Enable AI-powered smart analysis for auto-labeling using Spice Cloud Models'
+    description: 'Review the labels applied to the pull request with an AI model, adding and removing labels it judges wrong'
     required: false
     default: 'false'
   ai_model:
-    description: 'AI model to use for smart analysis (e.g., openai/gpt-5.4, anthropic/claude-3-5-sonnet)'
+    description: "Model name, passed to the endpoint verbatim. On Spice Cloud this is the model's name in your spicepod; against OpenAI it is a model id such as 'gpt-5.4'."
     required: false
-    default: 'openai/gpt-5.4'
+    default: 'openai'
   github_token:
     description: 'GitHub token for posting comments to PR thread'
     required: false
