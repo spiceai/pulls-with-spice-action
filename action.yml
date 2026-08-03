@@ -34,6 +34,20 @@ inputs:
   required_issue_types:
     description: 'Pull request must include one of these issue types in conventional commit format (comma-separated)'
     required: false
+  require_issue_type:
+    description: "Require GitHub's native issue Type field to be set. Issues only — pull requests have no native type."
+    required: false
+    default: 'false'
+  allowed_issue_types:
+    description: "Restrict GitHub's native issue Type to these values (comma-separated, e.g. 'Bug,Feature,Task'). Issues only."
+    required: false
+  require_priority_for_types:
+    description: "Require a priority when the native issue Type is one of these (comma-separated, e.g. 'Bug'). Issues only."
+    required: false
+  priority_field_name:
+    description: 'Name of the native single-select issue field holding priority'
+    required: false
+    default: 'Priority'
   require_milestone:
     description: 'Whether to require a milestone on the pull request'
     required: false

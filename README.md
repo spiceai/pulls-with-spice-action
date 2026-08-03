@@ -88,6 +88,10 @@ jobs:
 | `require_assignee`               | Require at least one assignee                            | No       | `false`               |
 | `enforce_draft`                  | Require non-draft pull requests                          | No       | `false`               |
 | `required_issue_types`           | PR must include one of these conventional commit types   | No       | -                     |
+| `require_issue_type`             | Require GitHub's native issue **Type** (issues only)     | No       | `false`               |
+| `allowed_issue_types`            | Restrict the native Type to these (comma-separated)      | No       | -                     |
+| `require_priority_for_types`     | Require a priority for these types (comma-separated)     | No       | -                     |
+| `priority_field_name`            | Name of the native single-select priority field          | No       | `Priority`            |
 | `require_milestone`              | Require a milestone on the PR                            | No       | `false`               |
 | `branch_name_pattern`            | Regex pattern that branch names must match               | No       | -                     |
 | `auto_label`                     | Enable automatic labeling based on file paths            | No       | `false`               |
@@ -96,6 +100,57 @@ jobs:
 | `auto_assign_author`             | Assign the PR author automatically                       | No       | `false`               |
 | `auto_assign_users`              | Users to auto-assign (comma-separated)                   | No       | -                     |
 | `custom_error_messages`          | JSON object with custom error messages                   | No       | -                     |
+
+## Native Type and Priority (issues)
+
+GitHub now has first-class **Type** and custom **issue fields** on issues, so type and
+priority no longer have to be encoded in labels like `kind/bug` or `priority/p1`. These
+inputs enforce the native fields directly:
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v2
+  with:
+    require_issue_type: 'true'
+    allowed_issue_types: 'Bug,Feature,Task'
+    # Urgency is meaningful for a defect and mostly noise for a chore, so only
+    # bugs are required to carry one.
+    require_priority_for_types: 'Bug'
+    priority_field_name: 'Priority'
+```
+
+An issue typed `Bug` must then also have a `Priority` set; a `Task` needs only its type.
+
+**These apply to issues only.** GitHub exposes `issueType` and issue field values on the
+`Issue` GraphQL type and not on `PullRequest` — a pull request has no native type or
+priority to set, so enforcing one would fail every PR for something GitHub gives no way
+to satisfy. When the action runs on a pull request it logs that it is skipping these
+checks and moves on. To enforce them, run the action on issue events:
+
+```yaml
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled, reopened]
+```
+
+If the fields cannot be read — the organization has no issue types configured, or the
+token lacks the scope — the action **warns and skips** rather than failing, so a
+permissions gap never looks like a policy violation.
+
+## Recommended workflow hygiene
+
+This action can add labels and assignees, and those writes emit `labeled` / `assigned`
+events. If your workflow also *subscribes* to those events, each run triggers further
+runs, and several can then race on the same pull request. Add a `concurrency` group so
+only the newest run for a given PR survives:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+```
+
+Keep the `labeled`/`unlabeled` triggers — they are what re-runs the check when someone
+adds the missing label — and let `concurrency` collapse the redundant runs.
 
 ## Label Prefixes
 
