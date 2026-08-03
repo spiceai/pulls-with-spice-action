@@ -22,23 +22,23 @@
     "author": "Luke Kim (Spice AI)",
     "license": "Apache-2.0",
     "dependencies": {
-        "@actions/core": "^3.0.0",
-        "@actions/github": "^9.0.0",
-        "@ai-sdk/openai": "^3.0.41",
+        "@actions/core": "^3.0.1",
+        "@actions/github": "^9.1.1",
+        "@ai-sdk/openai": "^4.0.26",
         "@ai-sdk/openai-compatible": "^2.0.35",
-        "ai": "^6.0.116",
-        "zod": "^4.3.6"
+        "ai": "^7.0.45",
+        "zod": "^4.4.3"
     },
     "devDependencies": {
         "@types/jest": "^30.0.0",
         "@types/node": "^25.5.0",
-        "@typescript-eslint/eslint-plugin": "^8.57.0",
+        "@typescript-eslint/eslint-plugin": "^8.65.0",
         "@typescript-eslint/parser": "^8.57.0",
-        "esbuild": "^0.27.4",
-        "eslint": "^10.0.3",
-        "jest": "^30.3.0",
-        "prettier": "^3.8.1",
-        "ts-jest": "^29.4.6",
-        "typescript": "^5.9.3"
+        "esbuild": "^0.28.1",
+        "eslint": "^10.8.0",
+        "jest": "^30.4.2",
+        "prettier": "^3.9.6",
+        "ts-jest": "^29.4.12",
+        "typescript": "^7.0.2"
     }
 }
