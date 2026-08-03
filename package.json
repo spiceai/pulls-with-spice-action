@@ -1,10 +1,10 @@
 {
     "name": "pulls-with-spice-action",
-    "version": "2.0.0",
+    "version": "3.0.0",
     "description": "GitHub Action to enforce standards for pull requests with extra spice",
     "main": "dist/index.js",
     "scripts": {
-        "build": "esbuild src/index.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.js --sourcemap",
+        "build": "esbuild src/index.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.js",
         "format": "prettier --write **/*.ts",
         "format-check": "prettier --check **/*.ts",
         "lint": "eslint src/**/*.ts",
@@ -39,6 +39,6 @@
         "jest": "^30.4.2",
         "prettier": "^3.9.6",
         "ts-jest": "^29.4.12",
-        "typescript": "^7.0.2"
+        "typescript": "^6.0.3"
     }
 }

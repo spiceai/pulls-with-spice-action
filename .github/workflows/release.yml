@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release, e.g. v2.1.0'
+        description: 'Version to release, e.g. v3.0.0'
         required: true
         type: string
       prerelease:
@@ -91,8 +91,8 @@ jobs:
           git tag -a "$VERSION" -m "$VERSION"
           git push origin "refs/tags/$VERSION"
 
-          # The major tag floats by design — `@v2` is meant to follow the newest v2.
-          # Prereleases are excluded so `@v2` never points at one.
+          # The major tag floats by design — `@v3` is meant to follow the newest v3.
+          # Prereleases are excluded so `@v3` never points at one.
           if [[ "$IS_PRERELEASE" == "true" ]]; then
             echo "Prerelease $VERSION: leaving the major tag where it is."
           elif [[ "$VERSION" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then

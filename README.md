@@ -24,6 +24,19 @@ A GitHub Action that enforces standards for pull requests with extra flavor.
 - **Smart Comments**: Post detailed status reports with suggested fixes
 - **Customizable Messages**: Provide custom error messages for any check
 
+## Upgrading from v2
+
+Point your workflow at `@v3` and check one input:
+
+- **`auto_label_size` is gone.** GitHub applies size labels natively now, so the action
+  no longer does. Remove the input — an unrecognized input is only a warning, but leaving
+  it implies a behaviour you are no longer getting. Existing `size/*` labels are left
+  alone; the action simply stops adding them.
+
+Everything else is additive. `auto_assign_author` now works without `auto_assign`, which
+previously left it silently doing nothing, and the new AI, native-type and priority
+inputs are all opt-in and default to off.
+
 ## Quick Start
 
 Create a workflow file (e.g., `.github/workflows/pulls-with-spice.yml`) in your repository:
@@ -42,7 +55,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: spiceai/pulls-with-spice-action@v2
+      - uses: spiceai/pulls-with-spice-action@v3
         with:
           # Enable only what you need - all checks are off by default
           auto_label: 'true'
@@ -52,7 +65,7 @@ jobs:
 ## Full Configuration Example
 
 ```yaml
-- uses: spiceai/pulls-with-spice-action@v2
+- uses: spiceai/pulls-with-spice-action@v3
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     # Title and description requirements
@@ -113,7 +126,7 @@ priority no longer have to be encoded in labels like `kind/bug` or `priority/p1`
 inputs enforce the native fields directly:
 
 ```yaml
-- uses: spiceai/pulls-with-spice-action@v2
+- uses: spiceai/pulls-with-spice-action@v3
   with:
     require_issue_type: 'true'
     allowed_issue_types: 'Bug,Feature,Task'
@@ -211,7 +224,7 @@ description, changed files, current labels and the repository's full label list 
 model, and applies the additions and removals the model returns.
 
 ```yaml
-- uses: spiceai/pulls-with-spice-action@v2
+- uses: spiceai/pulls-with-spice-action@v3
   with:
     spice_api_key: ${{ secrets.SPICE_API_KEY }}
     ai_auto_label: 'true'
@@ -270,7 +283,7 @@ A `spice_api_key` beginning with `sk-` is treated as an OpenAI API key and sent 
 to OpenAI, with `spice_cloud_region` ignored. Give `ai_model` a bare OpenAI model name:
 
 ```yaml
-- uses: spiceai/pulls-with-spice-action@v2
+- uses: spiceai/pulls-with-spice-action@v3
   with:
     spice_api_key: ${{ secrets.OPENAI_API_KEY }}
     ai_auto_label: 'true'
@@ -280,7 +293,7 @@ to OpenAI, with `spice_cloud_region` ignored. Give `ai_model` a bare OpenAI mode
 ## Releasing
 
 `dist/` is not committed to the branch — it is built onto the tag. Release by running
-the **Release** workflow (`workflow_dispatch`) with the version, e.g. `v2.1.0`:
+the **Release** workflow (`workflow_dispatch`) with the version, e.g. `v3.0.0`:
 
 1. Lints, typechecks and builds the bundle, then runs it to confirm it loads.
 2. Commits `dist/` as a child of the released source commit and creates the version tag
