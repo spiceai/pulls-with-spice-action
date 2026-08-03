@@ -2,7 +2,7 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createOpenAI } from '@ai-sdk/openai';
-import { generateText, Output } from 'ai';
+import { APICallError, generateText, Output } from 'ai';
 import { z } from 'zod';
 
 interface CustomErrorMessages {
@@ -83,6 +83,13 @@ const MAX_BODY_LENGTH = 65536;
 const MAX_LABEL_NAME_LENGTH = 100;
 const MAX_LABELS_COUNT = 100;
 const MAX_CHANGED_FILES = 3000;
+/**
+ * The repository's whole label set is listed in the AI prompt, so it is bounded like
+ * every other paginated read here. No real repository comes close.
+ */
+const MAX_REPOSITORY_LABELS = 1000;
+/** Items per page for the REST list endpoints, which cap `per_page` at 100. */
+const REST_PAGE_SIZE = 100;
 /** Pages of `issueFieldValues` read before giving up — see `fetchNativeFields`. */
 const MAX_FIELD_VALUE_PAGES = 10;
 /**
@@ -138,35 +145,49 @@ async function run(): Promise<void> {
     const token = core.getInput('github_token');
     const octokit = token ? github.getOctokit(token) : null;
 
-    // Determine which features need file data (optimization: only fetch if needed)
-    const autoLabelEnabled = core.getInput('auto_label') === 'true';
-
-    // Get changed files for auto-labeling (if enabled)
-    let changedFiles: ChangedFile[] = [];
-    if (octokit && pullRequest.number && !isIssue && autoLabelEnabled) {
-      changedFiles = await getChangedFiles(octokit, pullRequest.number);
-    }
-
-    // Auto-labeling (runs before validation)
-    if (octokit && pullRequest.number) {
-      await performAutoLabeling(octokit, pullRequest, changedFiles);
-    }
-
-    // AI-powered auto-labeling (if enabled and Spice API key provided)
     const spiceApiKey = core.getInput('spice_api_key');
     if (spiceApiKey) {
       // Actions masks its own secrets, but the key can also arrive from a variable or a
       // literal. Register it so a provider error that quotes the request cannot print it.
       core.setSecret(spiceApiKey);
     }
-    const aiAutoLabelEnabled = core.getInput('ai_auto_label') === 'true';
-    if (octokit && pullRequest.number && spiceApiKey && aiAutoLabelEnabled) {
-      await performAIAutoLabeling(
+
+    const autoLabelEnabled = core.getInput('auto_label') === 'true';
+    const aiAutoLabelEnabled =
+      core.getInput('ai_auto_label') === 'true' && spiceApiKey !== '';
+
+    // Both labelling passes read the changed files, so the fetch is gated on whether
+    // *any* of them needs file data. Gating it on `auto_label` alone left the AI pass
+    // reviewing a pull request whose file list — its strongest signal — was empty.
+    let changedFiles: ChangedFile[] = [];
+    if (
+      octokit &&
+      pullRequest.number &&
+      !isIssue &&
+      (autoLabelEnabled || aiAutoLabelEnabled)
+    ) {
+      changedFiles = await getChangedFiles(octokit, pullRequest.number);
+    }
+
+    // Auto-labeling (runs before validation)
+    let labelsChanged = false;
+    if (octokit && pullRequest.number) {
+      labelsChanged = await performAutoLabeling(
+        octokit,
+        pullRequest,
+        changedFiles,
+      );
+    }
+
+    // AI label review, refining what the rule-based pass just applied.
+    if (octokit && pullRequest.number && aiAutoLabelEnabled) {
+      const aiChangedLabels = await performAIAutoLabeling(
         octokit,
         pullRequest,
         changedFiles,
         spiceApiKey,
       );
+      labelsChanged = labelsChanged || aiChangedLabels;
     }
 
     // Auto-assign (if enabled)
@@ -178,8 +199,11 @@ async function run(): Promise<void> {
     // Re-read the PR if we changed anything on it, so the checks below evaluate the
     // current state. This keyed off `auto_assign` before, which meant an author
     // assignment made via `auto_assign_author` left `pullRequest.assignees` stale and
-    // `checkAssignees` failed a PR the action had just assigned.
-    const needsRefresh = autoAppliedLabels.length > 0 || didAutoAssign;
+    // `checkAssignees` failed a PR the action had just assigned. The labelling passes
+    // report whether they wrote anything rather than being inferred from
+    // `autoAppliedLabels`, which only ever records *additions* — an AI pass that just
+    // removed a label would otherwise leave the checks judging the deleted label.
+    const needsRefresh = labelsChanged || didAutoAssign;
     if (octokit && pullRequest.number && needsRefresh) {
       // `issues.get` serves both — a PR is an issue — and unlike `pulls.get` it also
       // works when this action runs on an issue event.
@@ -397,8 +421,7 @@ function checkDescription(pullRequest: ContentObject): void {
 }
 
 function checkLabels(pullRequest: ContentObject): void {
-  const labels = pullRequest.labels || [];
-  const labelNames = labels.map((l) => l.name);
+  const labelNames = getLabelNames(pullRequest);
 
   // Check if any of the required labels are present
   const anyLabelsSuccess = enforceAnyLabels(labelNames);
@@ -572,35 +595,49 @@ function formatListWithBackticks(items: string[]): string {
   return `\`${items.join('`, `')}\``;
 }
 
+function getLabelNames(pullRequest: ContentObject): string[] {
+  return (pullRequest.labels || []).map((l) => l.name);
+}
+
 // ============================================================================
 // Auto-labeling Functions
 // ============================================================================
+
+/**
+ * Walks a paginated REST endpoint until it serves a short page or `maxItems` is reached.
+ * Every paginated read here is bounded, so a misbehaving endpoint degrades to a truncated
+ * list rather than looping forever.
+ */
+async function fetchAllPages<T>(
+  fetchPage: (page: number) => Promise<T[]>,
+  maxItems: number,
+): Promise<T[]> {
+  const items: T[] = [];
+
+  for (let page = 1; items.length < maxItems; page++) {
+    const batch = await fetchPage(page);
+    if (batch.length === 0) break;
+    items.push(...batch);
+    if (batch.length < REST_PAGE_SIZE) break;
+  }
+
+  return items.slice(0, maxItems);
+}
 
 async function getChangedFiles(
   octokit: ReturnType<typeof github.getOctokit>,
   prNumber: number,
 ): Promise<ChangedFile[]> {
   try {
-    const files: ChangedFile[] = [];
-    let page = 1;
-
-    // Paginate through all files with safety limit
-    while (files.length < MAX_CHANGED_FILES) {
+    return await fetchAllPages<ChangedFile>(async (page) => {
       const response = await octokit.rest.pulls.listFiles({
         ...github.context.repo,
         pull_number: prNumber,
-        per_page: 100,
-        page: page,
+        per_page: REST_PAGE_SIZE,
+        page,
       });
-
-      if (response.data.length === 0) break;
-
-      files.push(...(response.data as ChangedFile[]));
-      if (response.data.length < 100) break;
-      page++;
-    }
-
-    return files.slice(0, MAX_CHANGED_FILES);
+      return response.data as ChangedFile[];
+    }, MAX_CHANGED_FILES);
   } catch (error) {
     core.warning(`Failed to get changed files: ${error}`);
     return [];
@@ -611,51 +648,38 @@ async function getRepositoryLabels(
   octokit: ReturnType<typeof github.getOctokit>,
 ): Promise<string[]> {
   try {
-    const labels: string[] = [];
-    let page = 1;
-    let hasMore = true;
-
-    // Paginate through all labels
-    while (hasMore) {
+    const labels = await fetchAllPages<{ name: string }>(async (page) => {
       const response = await octokit.rest.issues.listLabelsForRepo({
         ...github.context.repo,
-        per_page: 100,
-        page: page,
+        per_page: REST_PAGE_SIZE,
+        page,
       });
-
-      if (response.data.length === 0) {
-        hasMore = false;
-      } else {
-        labels.push(
-          ...response.data.map((label: { name: string }) => label.name),
-        );
-        hasMore = response.data.length === 100;
-        page++;
-      }
-    }
+      return response.data;
+    }, MAX_REPOSITORY_LABELS);
 
     core.info(`Found ${labels.length} labels in repository`);
-    return labels;
+    return labels.map((label) => label.name);
   } catch (error) {
     core.warning(`Failed to get repository labels: ${error}`);
     return [];
   }
 }
 
+/** Returns true when labels were actually written, so the caller can refresh the PR. */
 async function performAutoLabeling(
   octokit: ReturnType<typeof github.getOctokit>,
   pullRequest: ContentObject,
   changedFiles: ChangedFile[],
-): Promise<void> {
+): Promise<boolean> {
   const autoLabelEnabled = core.getInput('auto_label') === 'true';
   const autoLabelTypeEnabled = core.getInput('auto_label_type') === 'true';
 
   if (!autoLabelEnabled && !autoLabelTypeEnabled) {
-    return;
+    return false;
   }
 
   const labelsToAdd: Set<string> = new Set();
-  const currentLabels = (pullRequest.labels || []).map((l) => l.name);
+  const currentLabels = getLabelNames(pullRequest);
   const currentKindLabels = currentLabels.filter((label) => isKindLabel(label));
   let pathBasedKindLabel: string | null = null;
 
@@ -694,22 +718,19 @@ async function performAutoLabeling(
 
   // Apply path-based rules
   for (const rule of builtInRules) {
-    for (const file of changedFiles) {
-      if (rule.paths.some((path) => file.filename.includes(path))) {
-        const sanitizedLabel = sanitizeString(
-          rule.label,
-          MAX_LABEL_NAME_LENGTH,
-        );
-        if (isKindLabel(sanitizedLabel)) {
-          // Keep a single path-based kind label candidate.
-          if (!pathBasedKindLabel) {
-            pathBasedKindLabel = sanitizedLabel;
-          }
-        } else {
-          labelsToAdd.add(sanitizedLabel);
-        }
-        break;
-      }
+    const matched = changedFiles.some((file) =>
+      rule.paths.some((path) => file.filename.includes(path)),
+    );
+    if (!matched) {
+      continue;
+    }
+
+    const sanitizedLabel = sanitizeString(rule.label, MAX_LABEL_NAME_LENGTH);
+    if (isKindLabel(sanitizedLabel)) {
+      // Keep a single path-based kind label candidate.
+      pathBasedKindLabel ??= sanitizedLabel;
+    } else {
+      labelsToAdd.add(sanitizedLabel);
     }
   }
 
@@ -724,12 +745,11 @@ async function performAutoLabeling(
 
   const preferredKindLabel = typeBasedKindLabel || pathBasedKindLabel;
   if (preferredKindLabel) {
-    if (
-      currentKindLabels.length === 0 ||
-      currentKindLabels.includes(preferredKindLabel)
-    ) {
-      labelsToAdd.add(preferredKindLabel);
-    } else {
+    const { accepted, rejected } = reconcileKindLabels(currentKindLabels, [
+      preferredKindLabel,
+    ]);
+    accepted.forEach((label) => labelsToAdd.add(label));
+    if (rejected.length > 0) {
       core.info(
         `Skipping auto-adding kind label "${preferredKindLabel}" because pull request already has kind label(s): ${currentKindLabels.join(', ')}`,
       );
@@ -750,10 +770,13 @@ async function performAutoLabeling(
       });
       autoAppliedLabels.push(...newLabels);
       core.info(`Auto-applied labels: ${newLabels.join(', ')}`);
+      return true;
     } catch (error) {
       core.warning(`Failed to apply labels: ${error}`);
     }
   }
+
+  return false;
 }
 
 function getTypeLabelFromTitle(title: string): string | null {
@@ -785,16 +808,49 @@ function isKindLabel(label: string): boolean {
   return label.startsWith('kind/');
 }
 
+/**
+ * `kind/` labels are mutually exclusive — an issue carries at most one.
+ *
+ * Given the kind labels that will still be on the issue once this run's removals land,
+ * splits the proposed additions into the ones that may be applied and the ones that must
+ * be dropped. A surviving kind label wins over any addition; with none surviving, the
+ * first candidate is taken and the rest dropped.
+ *
+ * Both labelling passes share this so the rule has one definition rather than one per
+ * pass. Non-`kind/` candidates are not this function's business and are ignored.
+ */
+function reconcileKindLabels(
+  keptKindLabels: string[],
+  candidates: string[],
+): { accepted: string[]; rejected: string[] } {
+  const kindCandidates = candidates.filter(isKindLabel);
+
+  if (keptKindLabels.length === 0) {
+    return {
+      accepted: kindCandidates.slice(0, 1),
+      rejected: kindCandidates.slice(1),
+    };
+  }
+
+  return {
+    accepted: kindCandidates.filter((label) => keptKindLabels.includes(label)),
+    rejected: kindCandidates.filter((label) => !keptKindLabels.includes(label)),
+  };
+}
+
 // ============================================================================
 // AI Auto-labeling Functions (Spice Cloud)
 // ============================================================================
 
+/** Returns true when labels were actually written, so the caller can refresh the PR. */
 async function performAIAutoLabeling(
   octokit: ReturnType<typeof github.getOctokit>,
   pullRequest: ContentObject,
   changedFiles: ChangedFile[],
   spiceApiKey: string,
-): Promise<void> {
+): Promise<boolean> {
+  let labelsChanged = false;
+
   try {
     core.info('Performing AI-powered auto-labeling refinement...');
 
@@ -803,19 +859,15 @@ async function performAIAutoLabeling(
     // label the rule-based pass had wrongly applied moments earlier — the single case
     // this pass exists to catch.
     const currentLabels = [
-      ...new Set([
-        ...(pullRequest.labels || []).map((l) => l.name),
-        ...autoAppliedLabels,
-      ]),
+      ...new Set([...getLabelNames(pullRequest), ...autoAppliedLabels]),
     ];
 
-    // Fetch available labels from the repository
     const repoLabels = await getRepositoryLabels(octokit);
     if (repoLabels.length === 0) {
       core.info(
         'No repository labels available; skipping AI label review. (See preceding warnings if the label fetch failed.)',
       );
-      return;
+      return false;
     }
 
     // Build the prompt for the LLM, including current labels for refinement
@@ -830,10 +882,9 @@ async function performAIAutoLabeling(
 
     if (!analysis) {
       aiAnalysisResults.push('AI analysis could not be completed.');
-      return;
+      return false;
     }
 
-    // Record the AI reasoning
     if (analysis.reasoning) {
       aiAnalysisResults.push(`**Reasoning:** ${analysis.reasoning}`);
     }
@@ -851,37 +902,34 @@ async function performAIAutoLabeling(
       );
     }
 
-    let labelsToAdd = analysis.labelsToAdd.filter(
+    const suggestedLabelsToAdd = analysis.labelsToAdd.filter(
       (label) => knownLabels.has(label) && !currentLabels.includes(label),
     );
     const labelsToRemove = analysis.labelsToRemove.filter((label) =>
       currentLabels.includes(label),
     );
 
-    // Keep `kind/` mutually exclusive, the same rule the rule-based pass follows. Any
-    // kind label the AI is not removing stays, so it wins over an addition; otherwise
-    // the first suggested one is taken and the rest dropped.
-    const survivingKindLabel = currentLabels.find(
+    // Keep `kind/` mutually exclusive, the same rule — and now the same code — the
+    // rule-based pass follows. Any kind label the AI is not removing survives, so it
+    // wins over an addition.
+    const survivingKindLabels = currentLabels.filter(
       (label) => isKindLabel(label) && !labelsToRemove.includes(label),
     );
-    const kindLabelsToAdd = labelsToAdd.filter(isKindLabel);
-    const acceptedKindLabel = survivingKindLabel
-      ? undefined
-      : kindLabelsToAdd[0];
-    const rejectedKindLabels = kindLabelsToAdd.filter(
-      (label) => label !== acceptedKindLabel,
+    const { rejected: rejectedKindLabels } = reconcileKindLabels(
+      survivingKindLabels,
+      suggestedLabelsToAdd,
+    );
+    const labelsToAdd = suggestedLabelsToAdd.filter(
+      (label) => !rejectedKindLabels.includes(label),
     );
     if (rejectedKindLabels.length > 0) {
-      labelsToAdd = labelsToAdd.filter(
-        (label) => !rejectedKindLabels.includes(label),
-      );
+      const survivor = survivingKindLabels[0];
       core.info(
         `Dropping AI kind label(s) ${formatListWithBackticks(rejectedKindLabels)} to keep a single kind label` +
-          (survivingKindLabel ? `; keeping \`${survivingKindLabel}\`` : ''),
+          (survivor ? `; keeping \`${survivor}\`` : ''),
       );
     }
 
-    // Remove labels that AI determined are incorrect
     if (labelsToRemove.length > 0 && pullRequest.number) {
       for (const label of labelsToRemove) {
         try {
@@ -890,6 +938,7 @@ async function performAIAutoLabeling(
             issue_number: pullRequest.number,
             name: label,
           });
+          labelsChanged = true;
           core.info(`AI removed label: ${label}`);
         } catch (error) {
           core.warning(`Failed to remove label ${label}: ${error}`);
@@ -900,7 +949,6 @@ async function performAIAutoLabeling(
       );
     }
 
-    // Add labels that AI suggests
     if (labelsToAdd.length > 0 && pullRequest.number) {
       try {
         await octokit.rest.issues.addLabels({
@@ -908,8 +956,9 @@ async function performAIAutoLabeling(
           issue_number: pullRequest.number,
           labels: labelsToAdd,
         });
-        // Plain label names: `autoAppliedLabels` also drives the post-labelling refresh
-        // in `run()`, so it must not carry display decoration.
+        labelsChanged = true;
+        // Plain label names: `autoAppliedLabels` is also the list shown in the PR
+        // comment, so it must not carry display decoration.
         autoAppliedLabels.push(...labelsToAdd);
         aiAnalysisResults.push(
           `**Labels added by AI:** ${formatListWithBackticks(labelsToAdd)}`,
@@ -932,6 +981,8 @@ async function performAIAutoLabeling(
       core.warning('AI auto-labeling failed with unknown error');
     }
   }
+
+  return labelsChanged;
 }
 
 function buildAILabelingPrompt(
@@ -1025,23 +1076,27 @@ function sanitizeAILabelAnalysis(analysis: AILabelAnalysis): AILabelAnalysis {
 
 function parseAILabelAnalysisFromText(text: string): AILabelAnalysis | null {
   const trimmed = text.trim();
-  const candidates: string[] = [trimmed];
 
+  // Models often wrap the JSON in prose or a code fence, so fall back to the span
+  // between the outermost braces when the response as a whole does not parse. When the
+  // response *is* bare JSON that span is the response, and there is only one attempt.
   const firstBrace = trimmed.indexOf('{');
   const lastBrace = trimmed.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
-  }
+  const extracted =
+    firstBrace >= 0 && lastBrace > firstBrace
+      ? trimmed.slice(firstBrace, lastBrace + 1)
+      : null;
+  const candidates =
+    extracted && extracted !== trimmed ? [trimmed, extracted] : [trimmed];
 
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(candidate);
-      const validated = AILabelAnalysisSchema.safeParse(parsed);
+      const validated = AILabelAnalysisSchema.safeParse(JSON.parse(candidate));
       if (validated.success) {
         return validated.data;
       }
     } catch {
-      // Try the next parsing candidate.
+      // Not JSON; try the next parsing candidate.
     }
   }
 
@@ -1060,8 +1115,10 @@ function describeModelError(error: unknown): string {
   if (!(error instanceof Error)) {
     return 'unknown error';
   }
-  const statusCode = (error as { statusCode?: number }).statusCode;
-  const status = statusCode ? ` (status ${statusCode})` : '';
+  const status =
+    APICallError.isInstance(error) && error.statusCode
+      ? ` (status ${error.statusCode})`
+      : '';
   return `${error.message || error.name}${status}`;
 }
 
@@ -1081,58 +1138,78 @@ async function callLabelingModel(
   try {
     // An `sk-` key is an OpenAI key, not a Spice Cloud one. Sending it to Spice Cloud
     // would just 401, so honour it directly and skip the region entirely.
-    if (isOpenAIKey(apiKey)) {
-      core.info(`Calling OpenAI directly with model "${modelName}"`);
+    const analysis = isOpenAIKey(apiKey)
+      ? await callOpenAIModel(apiKey, modelName, prompt)
+      : await callSpiceCloudModel(apiKey, modelName, prompt);
 
-      // The native OpenAI provider supports strict structured output, so the schema is
-      // enforced by the API rather than parsed back out of prose.
-      const { output } = await generateText({
-        model: createOpenAI({ apiKey })(modelName),
-        output: Output.object({ schema: AILabelAnalysisSchema }),
-        system: AI_LABELING_SYSTEM_PROMPT,
-        prompt,
-      });
-
-      return output ? sanitizeAILabelAnalysis(output) : null;
-    }
-
-    const region =
-      core.getInput('spice_cloud_region') || DEFAULT_SPICE_CLOUD_REGION;
-    const baseURL = getSpiceCloudBaseUrl(region);
-    core.info(
-      `Calling Spice Cloud model "${modelName}" in ${region} (${baseURL})`,
-    );
-
-    const provider = createOpenAICompatible({
-      name: 'spice-cloud',
-      apiKey,
-      baseURL,
-      headers: { 'X-API-Key': apiKey },
-    });
-
-    // Models served through Spice Cloud do not all honour `response_format`, so ask for
-    // JSON in the prompt and validate what comes back instead of relying on the API.
-    const { text } = await generateText({
-      model: provider(modelName),
-      system: `${AI_LABELING_SYSTEM_PROMPT} Return only valid JSON of the form {"labelsToAdd": string[], "labelsToRemove": string[], "reasoning": string}.`,
-      prompt,
-    });
-
-    const parsed = parseAILabelAnalysisFromText(text);
-    if (!parsed) {
-      core.warning(
-        `Model "${modelName}" did not return the expected JSON; leaving labels unchanged.`,
-      );
-      return null;
-    }
-
-    return sanitizeAILabelAnalysis(parsed);
+    return analysis ? sanitizeAILabelAnalysis(analysis) : null;
   } catch (error) {
     core.warning(
       `Model "${modelName}" could not be reached: ${describeModelError(error)}`,
     );
     return null;
   }
+}
+
+/**
+ * The native OpenAI provider supports strict structured output, so the schema is
+ * enforced by the API rather than parsed back out of prose.
+ */
+async function callOpenAIModel(
+  apiKey: string,
+  modelName: string,
+  prompt: string,
+): Promise<AILabelAnalysis | null> {
+  core.info(`Calling OpenAI directly with model "${modelName}"`);
+
+  const { output } = await generateText({
+    model: createOpenAI({ apiKey })(modelName),
+    output: Output.object({ schema: AILabelAnalysisSchema }),
+    system: AI_LABELING_SYSTEM_PROMPT,
+    prompt,
+  });
+
+  return output ?? null;
+}
+
+/**
+ * Spice Cloud proxies arbitrary models and they do not all honour `response_format`, so
+ * ask for JSON in the prompt and validate what comes back instead of relying on the API
+ * to enforce the schema.
+ */
+async function callSpiceCloudModel(
+  apiKey: string,
+  modelName: string,
+  prompt: string,
+): Promise<AILabelAnalysis | null> {
+  const region =
+    core.getInput('spice_cloud_region') || DEFAULT_SPICE_CLOUD_REGION;
+  const baseURL = getSpiceCloudBaseUrl(region);
+  core.info(
+    `Calling Spice Cloud model "${modelName}" in ${region} (${baseURL})`,
+  );
+
+  const provider = createOpenAICompatible({
+    name: 'spice-cloud',
+    apiKey,
+    baseURL,
+    headers: { 'X-API-Key': apiKey },
+  });
+
+  const { text } = await generateText({
+    model: provider(modelName),
+    system: `${AI_LABELING_SYSTEM_PROMPT} Return only valid JSON of the form {"labelsToAdd": string[], "labelsToRemove": string[], "reasoning": string}.`,
+    prompt,
+  });
+
+  const parsed = parseAILabelAnalysisFromText(text);
+  if (!parsed) {
+    core.warning(
+      `Model "${modelName}" did not return the expected JSON; leaving labels unchanged.`,
+    );
+  }
+
+  return parsed;
 }
 
 // ============================================================================
@@ -1431,7 +1508,7 @@ function checkLabelCategories(pullRequest: ContentObject): void {
     return;
   }
 
-  const labels = (pullRequest.labels || []).map((l) => l.name);
+  const labels = getLabelNames(pullRequest);
 
   for (const prefixInput of requiredPrefixes) {
     const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
