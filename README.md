@@ -233,11 +233,16 @@ bound what it is allowed to do:
 - It cannot add anything listed in `banned_labels`.
 - It enforces the same one-`kind/`-label rule as the rule-based pass.
 
-It also **only runs for authors who already have write access** (`OWNER`, `MEMBER` or
-`COLLABORATOR`). The PR title and description are attacker-controlled text going into a
-model prompt whose answer is then applied, so on an `issues` trigger — where anyone can
-open an issue and secrets are present — an ungated pass would let a stranger drive your
-labels. Everyone else still gets the rule-based labels and the checks.
+It also **only runs for authors who already have write access.** The PR title and
+description are attacker-controlled text going into a model prompt whose answer is then
+applied, so on an `issues` trigger — where anyone can open an issue and secrets are
+present — an ungated pass would let a stranger drive your labels. Everyone else still
+gets the rule-based labels and the checks.
+
+Write access is established from `author_association`, or from the branch living in this
+repository rather than a fork, or failing both by asking the API. The extra checks matter
+because `author_association` reports `MEMBER` only for *public* organization membership —
+on its own it locks out maintainers whose membership is private.
 
 ### Region
 

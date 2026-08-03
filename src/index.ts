@@ -133,15 +133,26 @@ function sanitizeString(input: string | undefined, maxLength: number): string {
  * labels needs triage; opening an issue needs nothing. Without this gate the pass hands
  * the lower privilege the higher one.
  *
- * `author_association` comes from the event payload, so this costs no API call. Anything
- * it does not vouch for is refused rather than assumed safe.
+ * Two free signals are checked before spending an API call, because `author_association`
+ * alone is not enough: it reports `MEMBER` only for *public* organization membership, so
+ * a maintainer whose membership is private arrives as `CONTRIBUTOR` and would be refused
+ * on their own repository. A branch living in this repository is the stronger signal —
+ * pushing it required write access in the first place.
+ *
+ * Whatever none of that vouches for is refused rather than assumed safe.
  */
-function senderCanWrite(): boolean {
-  const subject =
-    github.context.payload.pull_request ?? github.context.payload.issue;
-  const association = (subject as { author_association?: string } | undefined)
-    ?.author_association;
+async function senderCanWrite(
+  octokit: ReturnType<typeof github.getOctokit>,
+): Promise<boolean> {
+  const subject = (github.context.payload.pull_request ??
+    github.context.payload.issue) as
+    | {
+        author_association?: string;
+        head?: { repo?: { full_name?: string } | null };
+      }
+    | undefined;
 
+  const association = subject?.author_association;
   if (
     association &&
     ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association)
@@ -149,8 +160,36 @@ function senderCanWrite(): boolean {
     return true;
   }
 
+  // A pull request whose head branch is in this repository, rather than a fork, was
+  // pushed by someone with write access.
+  const headRepo = subject?.head?.repo?.full_name;
+  const thisRepo = `${github.context.repo.owner}/${github.context.repo.repo}`;
+  if (headRepo && headRepo === thisRepo) {
+    return true;
+  }
+
+  const actor = github.context.actor;
+  if (actor) {
+    try {
+      const { data } = await octokit.rest.repos.getCollaboratorPermissionLevel({
+        ...github.context.repo,
+        username: actor,
+      });
+      if (data.permission === 'admin' || data.permission === 'write') {
+        return true;
+      }
+    } catch (error) {
+      // Reading collaborator permissions itself needs push access. A token without it
+      // cannot confirm the actor, so the pass is skipped rather than run unverified.
+      core.warning(
+        `Could not confirm whether ${actor} has write access (${error instanceof Error ? error.message : 'unknown error'}). Skipping AI label review.`,
+      );
+      return false;
+    }
+  }
+
   core.info(
-    `Skipping AI label review: ${github.context.actor || 'the author'} does not have write access ` +
+    `Skipping AI label review: ${actor || 'the author'} does not have write access ` +
       `(author_association: ${association ?? 'unknown'}). The rule-based labels still apply.`,
   );
   return false;
@@ -225,7 +264,7 @@ async function run(): Promise<void> {
       octokit &&
       pullRequest.number &&
       aiAutoLabelEnabled &&
-      senderCanWrite()
+      (await senderCanWrite(octokit))
     ) {
       const aiChangedLabels = await performAIAutoLabeling(
         octokit,
