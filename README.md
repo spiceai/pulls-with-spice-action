@@ -221,9 +221,23 @@ It runs only when `ai_auto_label` is `true` **and** `spice_api_key` is set, and 
 fails the run: if the model is unreachable or answers with something unusable, the action
 warns and keeps the rule-based labels.
 
-Because it reviews rather than merely suggests, it **removes** labels too. It can only
-apply labels that already exist in the repository, and it enforces the same
-one-`kind/`-label rule as the rule-based pass.
+Because it reviews rather than merely suggests, it **removes** labels too. Four limits
+bound what it is allowed to do:
+
+- It can only apply labels that **already exist** in the repository — `addLabels` would
+  otherwise create an invented name as a new repository label.
+- It cannot remove a label your configuration requires. If `required_label_prefixes`,
+  `required_labels_any` or `required_labels_all` would be violated by a removal, the
+  label stays and the action logs why. Without this the pass could strip the last
+  `kind/` label and the checks in the same run would then fail the PR for missing it.
+- It cannot add anything listed in `banned_labels`.
+- It enforces the same one-`kind/`-label rule as the rule-based pass.
+
+It also **only runs for authors who already have write access** (`OWNER`, `MEMBER` or
+`COLLABORATOR`). The PR title and description are attacker-controlled text going into a
+model prompt whose answer is then applied, so on an `issues` trigger — where anyone can
+open an issue and secrets are present — an ungated pass would let a stranger drive your
+labels. Everyone else still gets the rule-based labels and the checks.
 
 ### Region
 

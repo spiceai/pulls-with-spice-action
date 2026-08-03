@@ -99,6 +99,13 @@ const MAX_FIELD_VALUE_PAGES = 10;
 const MAX_AI_REASONING_LENGTH = 2000;
 /** Changed files listed in the AI prompt. Enough to characterize a PR without paying for the tail. */
 const MAX_AI_PROMPT_FILES = 50;
+/**
+ * The description sent to the model, which gets its own much tighter bound than the
+ * 65536 characters the checks tolerate. Choosing labels needs the what and the why, not
+ * a template's worth of boilerplate or a pasted stack trace — and at the check limit the
+ * body alone would be ~90% of the prompt, billed again on every re-trigger of the run.
+ */
+const MAX_AI_PROMPT_BODY_LENGTH = 4000;
 // Collect errors and success messages
 const errorMessages: string[] = [];
 const successMessages: string[] = [];
@@ -113,6 +120,40 @@ const aiAnalysisResults: string[] = [];
 function sanitizeString(input: string | undefined, maxLength: number): string {
   if (!input) return '';
   return input.slice(0, maxLength);
+}
+
+/**
+ * Whether the account that triggered this run already has write access.
+ *
+ * The AI pass feeds attacker-controllable text — title, description, branch, filenames —
+ * to a model and then applies the labels it names. On a `pull_request` event that is
+ * contained, because a fork PR gets no secrets and so no API key. On an `issues` event
+ * it is not: issues live in the base repository, so secrets are present and any account
+ * can open one, and editing the issue re-fires the run for another attempt. Applying
+ * labels needs triage; opening an issue needs nothing. Without this gate the pass hands
+ * the lower privilege the higher one.
+ *
+ * `author_association` comes from the event payload, so this costs no API call. Anything
+ * it does not vouch for is refused rather than assumed safe.
+ */
+function senderCanWrite(): boolean {
+  const subject =
+    github.context.payload.pull_request ?? github.context.payload.issue;
+  const association = (subject as { author_association?: string } | undefined)
+    ?.author_association;
+
+  if (
+    association &&
+    ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association)
+  ) {
+    return true;
+  }
+
+  core.info(
+    `Skipping AI label review: ${github.context.actor || 'the author'} does not have write access ` +
+      `(author_association: ${association ?? 'unknown'}). The rule-based labels still apply.`,
+  );
+  return false;
 }
 
 async function run(): Promise<void> {
@@ -180,7 +221,12 @@ async function run(): Promise<void> {
     }
 
     // AI label review, refining what the rule-based pass just applied.
-    if (octokit && pullRequest.number && aiAutoLabelEnabled) {
+    if (
+      octokit &&
+      pullRequest.number &&
+      aiAutoLabelEnabled &&
+      senderCanWrite()
+    ) {
       const aiChangedLabels = await performAIAutoLabeling(
         octokit,
         pullRequest,
@@ -902,12 +948,39 @@ async function performAIAutoLabeling(
       );
     }
 
+    // The model does not know the repository's policy, so it must not be able to break
+    // it. Left unguarded it removed the only `kind/` label from a pull request whose
+    // config required one, and the checks a few lines later then failed that pull
+    // request for a violation this action had just created.
+    const protectedLabels = getPolicyProtectedLabels(currentLabels);
+    const bannedLabels = new Set(getInputArray('banned_labels'));
+
     const suggestedLabelsToAdd = analysis.labelsToAdd.filter(
-      (label) => knownLabels.has(label) && !currentLabels.includes(label),
+      (label) =>
+        knownLabels.has(label) &&
+        !currentLabels.includes(label) &&
+        !bannedLabels.has(label),
     );
-    const labelsToRemove = analysis.labelsToRemove.filter((label) =>
-      currentLabels.includes(label),
+    const refusedAdds = analysis.labelsToAdd.filter((label) =>
+      bannedLabels.has(label),
     );
+    if (refusedAdds.length > 0) {
+      core.warning(
+        `Ignoring AI-suggested labels that \`banned_labels\` forbids: ${formatListWithBackticks(refusedAdds)}`,
+      );
+    }
+
+    const labelsToRemove = analysis.labelsToRemove.filter(
+      (label) => currentLabels.includes(label) && !protectedLabels.has(label),
+    );
+    const refusedRemovals = analysis.labelsToRemove.filter((label) =>
+      protectedLabels.has(label),
+    );
+    if (refusedRemovals.length > 0) {
+      core.warning(
+        `Keeping ${formatListWithBackticks(refusedRemovals)} despite the AI suggesting removal: required by this workflow's label policy.`,
+      );
+    }
 
     // Keep `kind/` mutually exclusive, the same rule — and now the same code — the
     // rule-based pass follows. Any kind label the AI is not removing survives, so it
@@ -931,6 +1004,10 @@ async function performAIAutoLabeling(
     }
 
     if (labelsToRemove.length > 0 && pullRequest.number) {
+      // Removals go one call at a time and any of them can fail, so the report is built
+      // from what GitHub actually accepted. Listing the requested set instead told
+      // readers a label was gone while it was still on the pull request.
+      const removed: string[] = [];
       for (const label of labelsToRemove) {
         try {
           await octokit.rest.issues.removeLabel({
@@ -938,15 +1015,18 @@ async function performAIAutoLabeling(
             issue_number: pullRequest.number,
             name: label,
           });
+          removed.push(label);
           labelsChanged = true;
           core.info(`AI removed label: ${label}`);
         } catch (error) {
           core.warning(`Failed to remove label ${label}: ${error}`);
         }
       }
-      aiAnalysisResults.push(
-        `**Labels removed by AI:** ${formatListWithBackticks(labelsToRemove)}`,
-      );
+      if (removed.length > 0) {
+        aiAnalysisResults.push(
+          `**Labels removed by AI:** ${formatListWithBackticks(removed)}`,
+        );
+      }
     }
 
     if (labelsToAdd.length > 0 && pullRequest.number) {
@@ -985,6 +1065,90 @@ async function performAIAutoLabeling(
   return labelsChanged;
 }
 
+/**
+ * The labels this run must not end without, given the configured checks.
+ *
+ * The model is told the policy, but being told is not being bound by it: it removed the
+ * only `kind/` label from a pull request whose config required one, and the checks then
+ * failed that pull request for a violation this action had just created. A label is
+ * protected when it is the last thing satisfying a requirement — removing a duplicate is
+ * still allowed.
+ */
+function getPolicyProtectedLabels(currentLabels: string[]): Set<string> {
+  const protectedLabels = new Set<string>();
+
+  // Every label in `required_labels_all` is load-bearing on its own.
+  for (const label of getInputArray('required_labels_all')) {
+    if (currentLabels.includes(label)) {
+      protectedLabels.add(label);
+    }
+  }
+
+  // `required_labels_any` and each `required_label_prefixes` category are satisfied by
+  // one member, so only protect that member when it is the last one standing.
+  const requiredAny = getInputArray('required_labels_any');
+  const satisfyingAny = currentLabels.filter((label) =>
+    requiredAny.includes(label),
+  );
+  if (satisfyingAny.length === 1) {
+    protectedLabels.add(satisfyingAny[0] as string);
+  }
+
+  for (const prefixInput of getInputArray('required_label_prefixes')) {
+    const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
+    const satisfying = currentLabels.filter((label) =>
+      label.startsWith(prefix),
+    );
+    if (satisfying.length === 1) {
+      protectedLabels.add(satisfying[0] as string);
+    }
+  }
+
+  return protectedLabels;
+}
+
+/**
+ * Describes the configured label policy to the model.
+ *
+ * Without this the model was guessing at rules it was then judged against — it read the
+ * repository's `enhancement` label as satisfying the `kind/` category, dropped
+ * `kind/feature` as the redundant one, and left the pull request failing.
+ */
+function describeLabelPolicy(): string {
+  const rules: string[] = [];
+
+  const requiredPrefixes = getInputArray('required_label_prefixes');
+  for (const prefixInput of requiredPrefixes) {
+    const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
+    rules.push(
+      `- This pull request MUST keep at least one label whose name literally begins with \`${prefix}\`. Only that exact prefix counts — a label that merely means something similar does not.`,
+    );
+  }
+
+  const requiredAny = getInputArray('required_labels_any');
+  if (requiredAny.length > 0) {
+    rules.push(
+      `- It must keep at least one of: ${formatListWithBackticks(requiredAny)}.`,
+    );
+  }
+
+  const requiredAll = getInputArray('required_labels_all');
+  if (requiredAll.length > 0) {
+    rules.push(
+      `- It must keep all of: ${formatListWithBackticks(requiredAll)}.`,
+    );
+  }
+
+  const banned = getInputArray('banned_labels');
+  if (banned.length > 0) {
+    rules.push(`- Never suggest: ${formatListWithBackticks(banned)}.`);
+  }
+
+  return rules.length > 0
+    ? `## Label Policy (enforced after your response)\nThese rules are checked immediately after your labels are applied. Violating one fails the pull request.\n${rules.join('\n')}\n`
+    : '';
+}
+
 function buildAILabelingPrompt(
   pullRequest: ContentObject,
   changedFiles: ChangedFile[],
@@ -996,6 +1160,7 @@ function buildAILabelingPrompt(
     .map((f) => `- ${f.filename} (+${f.additions}/-${f.deletions})`)
     .join('\n');
   const omittedFiles = Math.max(0, changedFiles.length - MAX_AI_PROMPT_FILES);
+  const body = sanitizeString(pullRequest.body, MAX_AI_PROMPT_BODY_LENGTH);
 
   return `Review and refine the labels on this GitHub pull request.
 
@@ -1004,7 +1169,7 @@ function buildAILabelingPrompt(
 **Title:** ${pullRequest.title}
 
 **Description:**
-${pullRequest.body || 'No description provided'}
+${body || 'No description provided'}
 
 **Branch:** ${pullRequest.head?.ref || 'unknown'} -> ${pullRequest.base?.ref || 'unknown'}
 
@@ -1018,12 +1183,19 @@ ${currentLabels.length > 0 ? currentLabels.map((l) => `- ${l}`).join('\n') : 'No
 ## Available Labels in Repository
 ${repoLabels.map((l) => `- ${l}`).join('\n')}
 
+${describeLabelPolicy()}
 ## Instructions
 Review the currently applied labels and suggest improvements:
 1. Identify any labels that are incorrect or don't apply to this PR (add to labelsToRemove)
 2. Identify any missing labels that should be added (add to labelsToAdd)
-3. Consider the type of change, areas affected, and priority
-4. Ensure there is at most one label that starts with kind/
+3. Consider the type of change and the areas affected
+4. Keep at most one label whose name literally begins with \`kind/\`. Labels without that
+   prefix are never \`kind/\` labels, however similar their meaning — a repository may
+   well carry both \`enhancement\` and \`kind/feature\`, and they do not conflict.
+
+Judge the pull request by what it is *for*, not by the incidental churn it drags along.
+A feature that happens to touch a lock file is still a feature; a title beginning
+\`feat:\` or \`fix:\` is a strong statement of intent by the author.
 
 Be conservative - only suggest changes you are confident about. If the current labels are appropriate, return empty arrays.`;
 }
@@ -1133,12 +1305,26 @@ async function callLabelingModel(
   apiKey: string,
   prompt: string,
 ): Promise<AILabelAnalysis | null> {
-  const modelName = core.getInput('ai_model') || DEFAULT_AI_MODEL;
+  const configuredModel = core.getInput('ai_model');
+  const useOpenAI = isOpenAIKey(apiKey);
+
+  // `ai_model` defaults to a Spice Cloud model name, which OpenAI would reject. Rather
+  // than let the default turn into a 404 that reads as "the AI pass is broken", say
+  // plainly that this combination needs a real model id.
+  if (useOpenAI && !configuredModel) {
+    core.warning(
+      `Skipping AI label review: \`spice_api_key\` looks like an OpenAI key, so \`ai_model\` must name an OpenAI model (for example \`gpt-5.4\`). ` +
+        `The default \`${DEFAULT_AI_MODEL}\` is a Spice Cloud model name and OpenAI does not serve it.`,
+    );
+    return null;
+  }
+
+  const modelName = configuredModel || DEFAULT_AI_MODEL;
 
   try {
     // An `sk-` key is an OpenAI key, not a Spice Cloud one. Sending it to Spice Cloud
     // would just 401, so honour it directly and skip the region entirely.
-    const analysis = isOpenAIKey(apiKey)
+    const analysis = useOpenAI
       ? await callOpenAIModel(apiKey, modelName, prompt)
       : await callSpiceCloudModel(apiKey, modelName, prompt);
 

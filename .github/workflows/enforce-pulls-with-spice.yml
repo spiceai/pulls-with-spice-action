@@ -29,7 +29,10 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-      - run: npm ci
+      # --ignore-scripts: on a pull_request event the checkout is the PR's own code, so
+      # `npm ci` would run lifecycle scripts an outside contributor wrote. Nothing in
+      # lint, typecheck or the esbuild bundle needs them.
+      - run: npm ci --ignore-scripts
         if: github.event_name == 'pull_request'
       - run: npm run lint
         if: github.event_name == 'pull_request'

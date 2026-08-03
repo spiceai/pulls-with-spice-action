@@ -26,8 +26,18 @@ jobs:
 
       - name: Commit dist and update release tags
         shell: bash
+        # Passed through the environment rather than interpolated into the script.
+        # `${{ }}` is substituted before bash parses the line, and git permits `$`,
+        # backtick, `(`, `)`, `;` and `|` in a tag name — so an interpolated tag is a
+        # command, not a string.
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
-          VERSION="${{ github.event.release.tag_name }}"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "Refusing to build release from tag '$VERSION': not a semver tag." >&2
+            exit 1
+          fi
 
           git config user.name github-actions
           git config user.email github-actions@github.com
@@ -40,7 +50,7 @@ jobs:
           git push origin "$VERSION" --force
 
           # Update major version tag only for stable semver release tags (e.g., v2.3.1 -> v2)
-          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
             echo "Skipping major tag update for prerelease: $VERSION"
           elif [[ "$VERSION" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
             MAJOR="v${BASH_REMATCH[1]}"
