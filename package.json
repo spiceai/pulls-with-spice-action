@@ -24,9 +24,9 @@
     "dependencies": {
         "@actions/core": "^3.0.1",
         "@actions/github": "^9.1.1",
-        "@ai-sdk/openai": "^4.0.26",
+        "@ai-sdk/openai": "^4.0.27",
         "@ai-sdk/openai-compatible": "^2.0.35",
-        "ai": "^7.0.45",
+        "ai": "^7.0.48",
         "zod": "^4.4.3"
     },
     "devDependencies": {
