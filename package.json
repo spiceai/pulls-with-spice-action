@@ -25,7 +25,7 @@
         "@actions/core": "^3.0.1",
         "@actions/github": "^9.1.1",
         "@ai-sdk/openai": "^4.0.26",
-        "@ai-sdk/openai-compatible": "^2.0.35",
+        "@ai-sdk/openai-compatible": "^3.0.20",
         "ai": "^7.0.45",
         "zod": "^4.4.3"
     },
