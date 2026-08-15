@@ -51,8 +51,8 @@ function coreStub(inputs: Inputs): CoreStub {
  */
 async function runAction(scenario: Scenario): Promise<{
   core: CoreStub;
-  pullsGet: jest.Mock;
   issuesGet: jest.Mock;
+  action: typeof import('./index');
 }> {
   jest.resetModules();
 
@@ -61,19 +61,15 @@ async function runAction(scenario: Scenario): Promise<{
     ...scenario.inputs,
   });
 
-  const read = (): jest.Mock =>
-    scenario.readError
-      ? (jest.fn(async () => {
-          throw scenario.readError;
-        }) as jest.Mock)
-      : (jest.fn(async () => ({ data: scenario.current ?? {} })) as jest.Mock);
-
-  const pullsGet = read();
-  const issuesGet = read();
+  const { readError } = scenario;
+  const issuesGet = readError
+    ? jest.fn(async () => {
+        throw readError;
+      })
+    : jest.fn(async () => ({ data: scenario.current }));
 
   const octokit = {
     rest: {
-      pulls: { get: pullsGet },
       issues: {
         get: issuesGet,
         listComments: jest.fn(async () => ({ data: [] })),
@@ -96,7 +92,7 @@ async function runAction(scenario: Scenario): Promise<{
   const action = await import('./index');
   await action.completed;
 
-  return { core, pullsGet, issuesGet };
+  return { core, issuesGet, action };
 }
 
 /** A pull request as the payload carries it, before any of the metadata below was applied. */
@@ -194,17 +190,16 @@ describe('evaluating the subject as it is now', () => {
     );
   });
 
-  it('reads a pull request from the pulls endpoint and an issue from the issues endpoint', async () => {
-    // `issues.get` serves a pull request too, but does not report `draft`; only the issues
-    // endpoint exists for an issue.
+  it('reads whichever subject the event delivered', async () => {
+    // One endpoint serves both — a pull request is an issue — so the read does not have to
+    // know which kind of subject it was handed.
     const asPull = await runAction({
       payload: { pull_request: PULL_REQUEST },
       current: PULL_REQUEST,
     });
-    expect(asPull.pullsGet).toHaveBeenCalledWith(
-      expect.objectContaining({ pull_number: 12739 }),
+    expect(asPull.issuesGet).toHaveBeenCalledWith(
+      expect.objectContaining({ issue_number: 12739 }),
     );
-    expect(asPull.issuesGet).not.toHaveBeenCalled();
 
     const asIssue = await runAction({
       payload: { issue: { ...PULL_REQUEST, number: 12805 } },
@@ -213,7 +208,6 @@ describe('evaluating the subject as it is now', () => {
     expect(asIssue.issuesGet).toHaveBeenCalledWith(
       expect.objectContaining({ issue_number: 12805 }),
     );
-    expect(asIssue.pullsGet).not.toHaveBeenCalled();
   });
 });
 
@@ -256,40 +250,71 @@ describe('when the subject cannot be read', () => {
   });
 });
 
-describe('bounding what is read', () => {
-  it('applies the content limits to API-read state, not only to the payload', async () => {
-    const { applySubjectState, sanitizeSubject } = await runAction({
+describe('applying what was read', () => {
+  it('bounds API-read state, not only the payload', async () => {
+    const { action } = await runAction({
       payload: { pull_request: PULL_REQUEST },
       current: PULL_REQUEST,
-    }).then(() => import('./index'));
+    });
 
-    const subject: Parameters<typeof applySubjectState>[0] = {
+    const subject: Parameters<typeof action.applySubjectState>[0] = {
       title: 'the payload title',
     };
-    applySubjectState(subject, {
+    action.applySubjectState(subject, {
       title: 'a'.repeat(600),
       body: 'b'.repeat(70_000),
       labels: Array.from({ length: 150 }, (_, i) => ({ name: `label-${i}` })),
     });
-    sanitizeSubject(subject);
 
     expect(subject.title).toHaveLength(500);
     expect(subject.body).toHaveLength(65_536);
     expect(subject.labels).toHaveLength(100);
   });
 
-  it('clears a milestone that is no longer set', async () => {
-    const { applySubjectState } = await runAction({
+  it('drops a label the response reports without a name', async () => {
+    const { action } = await runAction({
       payload: { pull_request: PULL_REQUEST },
       current: PULL_REQUEST,
-    }).then(() => import('./index'));
+    });
 
-    const subject: Parameters<typeof applySubjectState>[0] = {
+    const subject: Parameters<typeof action.applySubjectState>[0] = {
+      title: 'a pull request',
+    };
+    action.applySubjectState(subject, { labels: [{}, { name: 'kind/bug' }] });
+
+    expect(subject.labels).toEqual([{ name: 'kind/bug' }]);
+  });
+
+  it('clears a milestone that is no longer set', async () => {
+    const { action } = await runAction({
+      payload: { pull_request: PULL_REQUEST },
+      current: PULL_REQUEST,
+    });
+
+    const subject: Parameters<typeof action.applySubjectState>[0] = {
       title: 'a pull request',
       milestone: { title: 'v1.10.0', number: 4 },
     };
-    applySubjectState(subject, { title: 'a pull request', milestone: null });
+    action.applySubjectState(subject, { milestone: null });
 
     expect(subject.milestone).toBeUndefined();
+  });
+
+  it('leaves a field the response does not carry alone', async () => {
+    // An omitted field is not the same as one reported unset: a response that says nothing
+    // about the draft state must not be read as "not a draft".
+    const { action } = await runAction({
+      payload: { pull_request: PULL_REQUEST },
+      current: PULL_REQUEST,
+    });
+
+    const subject: Parameters<typeof action.applySubjectState>[0] = {
+      title: 'the payload title',
+      draft: true,
+    };
+    action.applySubjectState(subject, { labels: [] });
+
+    expect(subject.draft).toBe(true);
+    expect(subject.title).toBe('the payload title');
   });
 });
