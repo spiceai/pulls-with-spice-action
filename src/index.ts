@@ -35,6 +35,24 @@ interface ContentObject {
   base?: { ref: string };
 }
 
+/**
+ * The subject fields a check can see change under it. Everything else `ContentObject` carries —
+ * the number, the author, the head and base refs — is fixed for the life of the pull request,
+ * so the payload remains a good enough source for those.
+ *
+ * Typed loosely because it is filled from two endpoints that disagree on shape: the issues
+ * endpoint can report a label as a bare string, and both report `null` where the payload omits
+ * the field.
+ */
+interface SubjectState {
+  title?: string;
+  body?: string | null;
+  labels?: (string | { name?: string })[];
+  assignees?: { login: string }[] | null;
+  draft?: boolean;
+  milestone?: { title: string; number: number } | null;
+}
+
 interface AutoLabelRule {
   label: string;
   paths: string[];
@@ -123,6 +141,23 @@ function sanitizeString(input: string | undefined, maxLength: number): string {
 }
 
 /**
+ * Bounds the fields an outside contributor controls, so extremely long content cannot be used
+ * to exhaust this job or the comment it posts.
+ *
+ * Applied after every read of the subject rather than once at the top, because the state the
+ * checks evaluate is written from more than one source — the event payload, and the API reads
+ * that supersede it — and a limit only one of those paths honours is not a limit.
+ */
+function sanitizeSubject(subject: ContentObject): void {
+  subject.title = sanitizeString(subject.title, MAX_TITLE_LENGTH);
+  subject.body = sanitizeString(subject.body, MAX_BODY_LENGTH);
+
+  if (subject.labels && subject.labels.length > MAX_LABELS_COUNT) {
+    subject.labels = subject.labels.slice(0, MAX_LABELS_COUNT);
+  }
+}
+
+/**
  * Whether the account that triggered this run already has write access.
  *
  * The AI pass feeds attacker-controllable text — title, description, branch, filenames —
@@ -195,6 +230,86 @@ async function senderCanWrite(
   return false;
 }
 
+/**
+ * Reads the subject's mutable metadata from the API instead of trusting the event payload.
+ *
+ * The payload is a snapshot frozen when the run was created, and re-running a workflow replays
+ * that same snapshot. Every check below reads mutable metadata — labels, assignees, title,
+ * description, draft state, milestone — so a re-run reports the pull request as it was at event
+ * time. A verdict can then never observe the change that discharged it: the re-run reproduces
+ * the original failure, and because its check-run is the newest one on the commit, that stale
+ * failure outranks the success that already followed the fix. Checks that read commit content
+ * re-run correctly, which is why this bites metadata gates specifically.
+ *
+ * The same read narrows the race at `opened`, where an assignee or label applied moments after
+ * the pull request was created is absent from the payload but present by the time this job runs.
+ *
+ * Returns `null` when the subject cannot be read, leaving the caller on the payload: a gate that
+ * failed because the API blipped would be the same class of false red this exists to remove.
+ */
+async function fetchSubjectState(
+  octokit: ReturnType<typeof github.getOctokit>,
+  subjectNumber: number,
+  isIssue: boolean,
+): Promise<SubjectState | null> {
+  try {
+    // A pull request is an issue, so `issues.get` serves both — but it does not report
+    // `draft`, and issues have no pull-request endpoint. Each subject is read from the
+    // endpoint that describes all of it.
+    const { data } = isIssue
+      ? await octokit.rest.issues.get({
+          ...github.context.repo,
+          issue_number: subjectNumber,
+        })
+      : await octokit.rest.pulls.get({
+          ...github.context.repo,
+          pull_number: subjectNumber,
+        });
+
+    return data as SubjectState;
+  } catch (error) {
+    core.warning(
+      `Could not read #${subjectNumber} from the API ` +
+        `(${error instanceof Error ? error.message : 'unknown error'}). Falling back to the ` +
+        'event payload, which is a snapshot from when this run was created.',
+    );
+    return null;
+  }
+}
+
+/** Normalizes the label shapes the two endpoints and the payload disagree on. */
+function normalizeLabels(labels: SubjectState['labels']): Label[] {
+  return (labels ?? []).map((label) =>
+    typeof label === 'string' ? { name: label } : { name: label.name ?? '' },
+  );
+}
+
+/**
+ * Writes read state onto the subject the checks evaluate.
+ *
+ * Absent fields are written as absent rather than skipped: a label or assignee removed since the
+ * payload was cut has to disappear from what is evaluated, or the read would only ever be able to
+ * add to a stale snapshot.
+ */
+function applySubjectState(subject: ContentObject, state: SubjectState): void {
+  if (typeof state.title === 'string') {
+    subject.title = state.title;
+  }
+  subject.body = state.body ?? '';
+  subject.labels = normalizeLabels(state.labels);
+  subject.assignees = (state.assignees ?? []).map(({ login }) => ({ login }));
+  subject.draft = state.draft === true;
+
+  if (state.milestone) {
+    subject.milestone = {
+      title: state.milestone.title,
+      number: state.milestone.number,
+    };
+  } else {
+    delete subject.milestone;
+  }
+}
+
 async function run(): Promise<void> {
   try {
     // Accept either a pull request or an issue. Everything below except the
@@ -213,17 +328,28 @@ async function run(): Promise<void> {
       return;
     }
 
-    // Sanitize inputs to prevent potential issues with extremely long content
-    pullRequest.title = sanitizeString(pullRequest.title, MAX_TITLE_LENGTH);
-    pullRequest.body = sanitizeString(pullRequest.body, MAX_BODY_LENGTH);
-
-    // Limit labels to prevent abuse
-    if (pullRequest.labels && pullRequest.labels.length > MAX_LABELS_COUNT) {
-      pullRequest.labels = pullRequest.labels.slice(0, MAX_LABELS_COUNT);
-    }
-
     const token = core.getInput('github_token');
     const octokit = token ? github.getOctokit(token) : null;
+
+    // Judge the subject as it is now, not as the payload froze it — see `fetchSubjectState`.
+    if (octokit && pullRequest.number) {
+      const current = await fetchSubjectState(
+        octokit,
+        pullRequest.number,
+        isIssue,
+      );
+      if (current) {
+        applySubjectState(pullRequest, current);
+      }
+    } else if (!octokit) {
+      core.warning(
+        'No GitHub token provided, so the checks read the event payload. On a re-run that ' +
+          'payload is a snapshot from when the run was created, and the verdict may describe ' +
+          'a state this pull request has already left.',
+      );
+    }
+
+    sanitizeSubject(pullRequest);
 
     const spiceApiKey = core.getInput('spice_api_key');
     if (spiceApiKey) {
@@ -281,8 +407,8 @@ async function run(): Promise<void> {
       didAutoAssign = await performAutoAssign(octokit, pullRequest);
     }
 
-    // Re-read the PR if we changed anything on it, so the checks below evaluate the
-    // current state. This keyed off `auto_assign` before, which meant an author
+    // Re-read the subject if we changed anything on it, so the checks below evaluate what
+    // this run just wrote. This keyed off `auto_assign` before, which meant an author
     // assignment made via `auto_assign_author` left `pullRequest.assignees` stale and
     // `checkAssignees` failed a PR the action had just assigned. The labelling passes
     // report whether they wrote anything rather than being inferred from
@@ -290,14 +416,15 @@ async function run(): Promise<void> {
     // removed a label would otherwise leave the checks judging the deleted label.
     const needsRefresh = labelsChanged || didAutoAssign;
     if (octokit && pullRequest.number && needsRefresh) {
-      // `issues.get` serves both — a PR is an issue — and unlike `pulls.get` it also
-      // works when this action runs on an issue event.
-      const fresh = await octokit.rest.issues.get({
-        ...github.context.repo,
-        issue_number: pullRequest.number,
-      });
-      pullRequest.labels = fresh.data.labels as Label[];
-      pullRequest.assignees = fresh.data.assignees as User[];
+      const refreshed = await fetchSubjectState(
+        octokit,
+        pullRequest.number,
+        isIssue,
+      );
+      if (refreshed) {
+        applySubjectState(pullRequest, refreshed);
+        sanitizeSubject(pullRequest);
+      }
     }
 
     // Run all the quality checks
@@ -1782,4 +1909,13 @@ function checkBranchNaming(pullRequest: ContentObject): void {
   }
 }
 
-run();
+/**
+ * The runner executes this module as the action's entry point, so the pass starts on load.
+ *
+ * Exposed as a promise because a test imports this module rather than executing it, and needs
+ * a way to await the pass it just started. `run` handles its own failures, so this settles
+ * fulfilled whatever the verdict was.
+ */
+export const completed = run();
+
+export { applySubjectState, fetchSubjectState, run, sanitizeSubject };
