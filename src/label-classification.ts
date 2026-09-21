@@ -200,6 +200,7 @@ export function noneOptionKey(labelNames: readonly string[]): string {
   return `__no_kind_label_${suffix}__`;
 }
 
+/** Label names are object keys, and a name like `__proto__` must not change the object. */
 function emptyRecord<T>(): Record<string, T> {
   return Object.create(null) as Record<string, T>;
 }
@@ -208,6 +209,17 @@ function emptyRecord<T>(): Record<string, T> {
  * Prefer labels the pull request already has, so a capped question set can still correct
  * them, then labels the workflow requires, then the rest in repository order.
  */
+function labelRank(
+  name: string,
+  currentLabels: ReadonlySet<string>,
+  preferredPrefixes: readonly string[],
+): number {
+  if (currentLabels.has(name)) return 0;
+  if (preferredPrefixes.some((prefix) => name.startsWith(prefix))) return 1;
+  if (name.includes('/')) return 2;
+  return 3;
+}
+
 function rankLabels(
   labels: readonly ClassifiedLabel[],
   currentLabels: ReadonlySet<string>,
@@ -216,14 +228,9 @@ function rankLabels(
   return labels
     .map((label, index) => ({ label, index }))
     .sort((left, right) => {
-      const rank = (name: string): number => {
-        if (currentLabels.has(name)) return 0;
-        if (preferredPrefixes.some((prefix) => name.startsWith(prefix)))
-          return 1;
-        if (name.includes('/')) return 2;
-        return 3;
-      };
-      const byRank = rank(left.label.name) - rank(right.label.name);
+      const byRank =
+        labelRank(left.label.name, currentLabels, preferredPrefixes) -
+        labelRank(right.label.name, currentLabels, preferredPrefixes);
       return byRank !== 0 ? byRank : left.index - right.index;
     })
     .map((entry) => entry.label);
@@ -585,6 +592,13 @@ export function applyPolicyToRemovals(
  * supposed to cover. Each pass recomputes the additions that exclusivity still allows
  * and refuses any removal those additions no longer justify.
  */
+interface LabelEditDraft {
+  labelsToAdd: string[];
+  labelsToRemove: string[];
+  rejectedKindLabels: string[];
+  newlyRefused: string[];
+}
+
 export function planLabelEdits(
   currentLabels: readonly string[],
   requestedAdds: readonly string[],
@@ -604,12 +618,13 @@ export function planLabelEdits(
   );
   const refused = new Set<string>();
 
-  const compute = (): PlannedLabelEdits & { newlyRefused: string[] } => {
-    const removing = new Set(
-      requestedRemovalList.filter((label) => !refused.has(label)),
+  const draft = (): LabelEditDraft => {
+    const removing = requestedRemovalList.filter(
+      (label) => !refused.has(label),
     );
+    const removingSet = new Set(removing);
     const survivingKind = current.filter(
-      (label) => isKindLabel(label) && !removing.has(label),
+      (label) => isKindLabel(label) && !removingSet.has(label),
     );
     const { accepted, rejected } = reconcileKindLabels(
       survivingKind,
@@ -621,35 +636,31 @@ export function planLabelEdits(
     );
     const policyResult = applyPolicyToRemovals(
       current,
-      [...removing],
+      removing,
       labelsToAdd,
       policy,
     );
     return {
       labelsToAdd,
       labelsToRemove: policyResult.removals,
-      refusedRemovals: [],
       rejectedKindLabels: rejected,
       newlyRefused: policyResult.refused,
     };
   };
 
-  let planned = compute();
+  // A refused removal can change which kind label survives, which can refuse another
+  // removal. Stop when a pass refuses nothing new. The cap is the removal count: each
+  // pass refuses at least one label.
+  let planned = draft();
   for (let attempt = 0; attempt < requestedRemovalList.length; attempt++) {
-    if (planned.newlyRefused.length === 0) {
+    const fresh = planned.newlyRefused.filter((label) => !refused.has(label));
+    if (fresh.length === 0) {
       break;
     }
-    let grew = false;
-    for (const label of planned.newlyRefused) {
-      if (!refused.has(label)) {
-        refused.add(label);
-        grew = true;
-      }
+    for (const label of fresh) {
+      refused.add(label);
     }
-    if (!grew) {
-      break;
-    }
-    planned = compute();
+    planned = draft();
   }
 
   return {

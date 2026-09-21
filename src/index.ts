@@ -6,6 +6,7 @@ import { APIError, TypeSafeClient } from '@typesafe-ai/sdk';
 import { APICallError, generateText, Output } from 'ai';
 import { z } from 'zod';
 import {
+  applyPolicyToRemovals,
   buildClassificationRequest,
   interpretClassification,
   isKindLabel,
@@ -62,6 +63,20 @@ interface ChangedFile {
 
 /** How long one Jev attempt may take. A full label set is still one request, with SDK retries on top. */
 const TYPESAFE_TIMEOUT_MS = 30_000;
+
+/** Forwards SDK logs into the action log. Debug is dropped because that is where request bodies are printed. */
+const typesafeLogger = {
+  debug(): void {},
+  info(message: string): void {
+    core.info(message);
+  },
+  warn(message: string): void {
+    core.warning(message);
+  },
+  error(message: string): void {
+    core.warning(message);
+  },
+};
 
 // Schema for AI label analysis response using structured outputs
 const AILabelAnalysisSchema = z.object({
@@ -980,6 +995,7 @@ async function performAIAutoLabeling(
     }
 
     const repoLabelNames = repoLabels.map((label) => label.name);
+    const policy = readLabelPolicy();
     const analysis = useTypesafe
       ? await callTypesafeLabeling(
           keys.typesafeApiKey,
@@ -987,6 +1003,7 @@ async function performAIAutoLabeling(
           changedFiles,
           repoLabels,
           currentLabels,
+          policy.requiredPrefixes,
         )
       : await callLabelingModel(
           keys.spiceApiKey,
@@ -1024,7 +1041,6 @@ async function performAIAutoLabeling(
       );
     }
 
-    const policy = readLabelPolicy();
     const bannedLabels = new Set(policy.banned);
     const refusedAdds = analysis.labelsToAdd.filter((label) =>
       bannedLabels.has(label),
@@ -1094,12 +1110,14 @@ async function performAIAutoLabeling(
       }
     }
 
-    const removalsAfterAdd = planLabelEdits(
+    // Re-check only the removals. The replacement has to be on the pull request now;
+    // planning the edit again would re-decide additions that already landed.
+    const removalsAfterAdd = applyPolicyToRemovals(
       [...currentLabels, ...added],
-      [],
       labelsToRemove,
+      [],
       policy,
-    ).labelsToRemove;
+    ).removals;
     const heldBack = labelsToRemove.filter(
       (label) => !removalsAfterAdd.includes(label),
     );
@@ -1352,8 +1370,8 @@ async function callTypesafeLabeling(
   changedFiles: ChangedFile[],
   repoLabels: ClassifiedLabel[],
   currentLabels: string[],
+  preferredPrefixes: readonly string[],
 ): Promise<AILabelAnalysis | null> {
-  const policy = readLabelPolicy();
   const request = buildClassificationRequest(
     {
       title: pullRequest.title,
@@ -1370,7 +1388,7 @@ async function callTypesafeLabeling(
     },
     repoLabels,
     currentLabels,
-    policy.requiredPrefixes,
+    preferredPrefixes,
   );
 
   if (!request) {
@@ -1398,21 +1416,7 @@ async function callTypesafeLabeling(
       apiKey,
       logLevel: 'info',
       timeout: TYPESAFE_TIMEOUT_MS,
-      logger: {
-        debug(): void {
-          // Request bodies stay out of the log. They are untrusted pull request text,
-          // and debug logging is where the SDK prints them.
-        },
-        info(message: string): void {
-          core.info(message);
-        },
-        warn(message: string): void {
-          core.warning(message);
-        },
-        error(message: string): void {
-          core.warning(message);
-        },
-      },
+      logger: typesafeLogger,
     });
 
     const result = await client.systemOne({
