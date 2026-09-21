@@ -2,8 +2,20 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createOpenAI } from '@ai-sdk/openai';
+import { APIError, TypeSafeClient } from '@typesafe-ai/sdk';
 import { APICallError, generateText, Output } from 'ai';
 import { z } from 'zod';
+import {
+  buildClassificationRequest,
+  interpretClassification,
+  isKindLabel,
+  normalizeLabelPrefix,
+  planLabelEdits,
+  reconcileKindLabels,
+  resolveTypesafeModel,
+  type ClassifiedLabel,
+  type LabelPolicy,
+} from './label-classification.js';
 
 interface CustomErrorMessages {
   [key: string]: string;
@@ -47,6 +59,9 @@ interface ChangedFile {
   deletions: number;
   patch?: string;
 }
+
+/** How long one Jev attempt may take. A full label set is still one request, with SDK retries on top. */
+const TYPESAFE_TIMEOUT_MS = 30_000;
 
 // Schema for AI label analysis response using structured outputs
 const AILabelAnalysisSchema = z.object({
@@ -120,6 +135,29 @@ const aiAnalysisResults: string[] = [];
 function sanitizeString(input: string | undefined, maxLength: number): string {
   if (!input) return '';
   return input.slice(0, maxLength);
+}
+
+/**
+ * TypeSafe's own clients read `TYPESAFE_API_KEY`. The action input is that same key
+ * and wins when both are set, so a workflow can pass the secret explicitly.
+ */
+function readTypesafeApiKey(): string {
+  const fromInput = core.getInput('typesafe_api_key').trim();
+  if (fromInput) {
+    return fromInput;
+  }
+  return (process.env.TYPESAFE_API_KEY ?? '').trim();
+}
+
+function readLabelPolicy(): LabelPolicy {
+  return {
+    requiredAny: getInputArray('required_labels_any'),
+    requiredAll: getInputArray('required_labels_all'),
+    requiredPrefixes: getInputArray('required_label_prefixes').map(
+      normalizeLabelPrefix,
+    ),
+    banned: getInputArray('banned_labels'),
+  };
 }
 
 /**
@@ -232,9 +270,18 @@ async function run(): Promise<void> {
       core.setSecret(spiceApiKey);
     }
 
+    const typesafeApiKey = readTypesafeApiKey();
+    if (typesafeApiKey) {
+      core.setSecret(typesafeApiKey);
+    }
+
     const autoLabelEnabled = core.getInput('auto_label') === 'true';
+    // A TypeSafe key turns on Jev classification by itself. With no TypeSafe key, the
+    // generative review runs when `ai_auto_label` is set and a Spice or OpenAI key is present.
+    const classifyWithJev = typesafeApiKey !== '';
     const aiAutoLabelEnabled =
-      core.getInput('ai_auto_label') === 'true' && spiceApiKey !== '';
+      classifyWithJev ||
+      (core.getInput('ai_auto_label') === 'true' && spiceApiKey !== '');
 
     // Both labelling passes read the changed files, so the fetch is gated on whether
     // *any* of them needs file data. Gating it on `auto_label` alone left the AI pass
@@ -270,7 +317,7 @@ async function run(): Promise<void> {
         octokit,
         pullRequest,
         changedFiles,
-        spiceApiKey,
+        { spiceApiKey, typesafeApiKey },
       );
       labelsChanged = labelsChanged || aiChangedLabels;
     }
@@ -731,9 +778,12 @@ async function getChangedFiles(
 
 async function getRepositoryLabels(
   octokit: ReturnType<typeof github.getOctokit>,
-): Promise<string[]> {
+): Promise<ClassifiedLabel[]> {
   try {
-    const labels = await fetchAllPages<{ name: string }>(async (page) => {
+    const labels = await fetchAllPages<{
+      name: string;
+      description?: string | null;
+    }>(async (page) => {
       const response = await octokit.rest.issues.listLabelsForRepo({
         ...github.context.repo,
         per_page: REST_PAGE_SIZE,
@@ -743,7 +793,10 @@ async function getRepositoryLabels(
     }, MAX_REPOSITORY_LABELS);
 
     core.info(`Found ${labels.length} labels in repository`);
-    return labels.map((label) => label.name);
+    return labels.map((label) => ({
+      name: label.name,
+      description: label.description ?? '',
+    }));
   } catch (error) {
     core.warning(`Failed to get repository labels: ${error}`);
     return [];
@@ -889,42 +942,8 @@ function getTypeLabelFromTitle(title: string): string | null {
   return null;
 }
 
-function isKindLabel(label: string): boolean {
-  return label.startsWith('kind/');
-}
-
-/**
- * `kind/` labels are mutually exclusive — an issue carries at most one.
- *
- * Given the kind labels that will still be on the issue once this run's removals land,
- * splits the proposed additions into the ones that may be applied and the ones that must
- * be dropped. A surviving kind label wins over any addition; with none surviving, the
- * first candidate is taken and the rest dropped.
- *
- * Both labelling passes share this so the rule has one definition rather than one per
- * pass. Non-`kind/` candidates are not this function's business and are ignored.
- */
-function reconcileKindLabels(
-  keptKindLabels: string[],
-  candidates: string[],
-): { accepted: string[]; rejected: string[] } {
-  const kindCandidates = candidates.filter(isKindLabel);
-
-  if (keptKindLabels.length === 0) {
-    return {
-      accepted: kindCandidates.slice(0, 1),
-      rejected: kindCandidates.slice(1),
-    };
-  }
-
-  return {
-    accepted: kindCandidates.filter((label) => keptKindLabels.includes(label)),
-    rejected: kindCandidates.filter((label) => !keptKindLabels.includes(label)),
-  };
-}
-
 // ============================================================================
-// AI Auto-labeling Functions (Spice Cloud)
+// AI Auto-labeling (Spice Cloud, OpenAI, or TypeSafe Jev)
 // ============================================================================
 
 /** Returns true when labels were actually written, so the caller can refresh the PR. */
@@ -932,12 +951,17 @@ async function performAIAutoLabeling(
   octokit: ReturnType<typeof github.getOctokit>,
   pullRequest: ContentObject,
   changedFiles: ChangedFile[],
-  spiceApiKey: string,
+  keys: { spiceApiKey: string; typesafeApiKey: string },
 ): Promise<boolean> {
   let labelsChanged = false;
+  const useTypesafe = keys.typesafeApiKey !== '';
 
   try {
-    core.info('Performing AI-powered auto-labeling refinement...');
+    core.info(
+      useTypesafe
+        ? 'Classifying labels with TypeSafe Jev...'
+        : 'Performing AI-powered auto-labeling refinement...',
+    );
 
     // The rule-based pass just ran and its labels are not yet reflected on
     // `pullRequest`. Reviewing the stale list would leave the AI unable to remove a
@@ -955,18 +979,31 @@ async function performAIAutoLabeling(
       return false;
     }
 
-    // Build the prompt for the LLM, including current labels for refinement
-    const prompt = buildAILabelingPrompt(
-      pullRequest,
-      changedFiles,
-      repoLabels,
-      currentLabels,
-    );
-
-    const analysis = await callLabelingModel(spiceApiKey, prompt);
+    const repoLabelNames = repoLabels.map((label) => label.name);
+    const analysis = useTypesafe
+      ? await callTypesafeLabeling(
+          keys.typesafeApiKey,
+          pullRequest,
+          changedFiles,
+          repoLabels,
+          currentLabels,
+        )
+      : await callLabelingModel(
+          keys.spiceApiKey,
+          buildAILabelingPrompt(
+            pullRequest,
+            changedFiles,
+            repoLabelNames,
+            currentLabels,
+          ),
+        );
 
     if (!analysis) {
-      aiAnalysisResults.push('AI analysis could not be completed.');
+      aiAnalysisResults.push(
+        useTypesafe
+          ? 'TypeSafe Jev label classification could not be completed.'
+          : 'AI analysis could not be completed.',
+      );
       return false;
     }
 
@@ -977,7 +1014,7 @@ async function performAIAutoLabeling(
     // `addLabels` *creates* a label that does not exist yet, so an invented name would
     // silently add it to the repository's label set rather than fail. Only names the
     // prompt actually offered are allowed through.
-    const knownLabels = new Set(repoLabels);
+    const knownLabels = new Set(repoLabelNames);
     const invented = analysis.labelsToAdd.filter(
       (label) => !knownLabels.has(label),
     );
@@ -987,19 +1024,8 @@ async function performAIAutoLabeling(
       );
     }
 
-    // The model does not know the repository's policy, so it must not be able to break
-    // it. Left unguarded it removed the only `kind/` label from a pull request whose
-    // config required one, and the checks a few lines later then failed that pull
-    // request for a violation this action had just created.
-    const protectedLabels = getPolicyProtectedLabels(currentLabels);
-    const bannedLabels = new Set(getInputArray('banned_labels'));
-
-    const suggestedLabelsToAdd = analysis.labelsToAdd.filter(
-      (label) =>
-        knownLabels.has(label) &&
-        !currentLabels.includes(label) &&
-        !bannedLabels.has(label),
-    );
+    const policy = readLabelPolicy();
+    const bannedLabels = new Set(policy.banned);
     const refusedAdds = analysis.labelsToAdd.filter((label) =>
       bannedLabels.has(label),
     );
@@ -1009,45 +1035,86 @@ async function performAIAutoLabeling(
       );
     }
 
-    const labelsToRemove = analysis.labelsToRemove.filter(
-      (label) => currentLabels.includes(label) && !protectedLabels.has(label),
+    // Kind exclusivity and the label policy are applied together. A removal that would
+    // leave a requirement unmet is refused, unless an addition that will actually land
+    // still satisfies it — replacing `kind/bug` with `kind/feature` is allowed, deleting
+    // the last `kind/` label is not.
+    const suggestedLabelsToAdd = analysis.labelsToAdd.filter(
+      (label) => knownLabels.has(label) && !bannedLabels.has(label),
     );
-    const refusedRemovals = analysis.labelsToRemove.filter((label) =>
-      protectedLabels.has(label),
+    const planned = planLabelEdits(
+      currentLabels,
+      suggestedLabelsToAdd,
+      analysis.labelsToRemove,
+      policy,
     );
-    if (refusedRemovals.length > 0) {
+    const labelsToAdd = planned.labelsToAdd;
+    const labelsToRemove = planned.labelsToRemove;
+
+    if (planned.refusedRemovals.length > 0) {
       core.warning(
-        `Keeping ${formatListWithBackticks(refusedRemovals)} despite the AI suggesting removal: required by this workflow's label policy.`,
+        `Keeping ${formatListWithBackticks(planned.refusedRemovals)} despite the suggestion to remove them: required by this workflow's label policy.`,
+      );
+      aiAnalysisResults.push(
+        `**Kept to satisfy the label policy:** ${formatListWithBackticks(planned.refusedRemovals)}`,
       );
     }
-
-    // Keep `kind/` mutually exclusive, the same rule — and now the same code — the
-    // rule-based pass follows. Any kind label the AI is not removing survives, so it
-    // wins over an addition.
-    const survivingKindLabels = currentLabels.filter(
-      (label) => isKindLabel(label) && !labelsToRemove.includes(label),
-    );
-    const { rejected: rejectedKindLabels } = reconcileKindLabels(
-      survivingKindLabels,
-      suggestedLabelsToAdd,
-    );
-    const labelsToAdd = suggestedLabelsToAdd.filter(
-      (label) => !rejectedKindLabels.includes(label),
-    );
-    if (rejectedKindLabels.length > 0) {
-      const survivor = survivingKindLabels[0];
+    if (planned.rejectedKindLabels.length > 0) {
+      const survivor = currentLabels.find(
+        (label) => isKindLabel(label) && !labelsToRemove.includes(label),
+      );
       core.info(
-        `Dropping AI kind label(s) ${formatListWithBackticks(rejectedKindLabels)} to keep a single kind label` +
+        `Dropping AI kind label(s) ${formatListWithBackticks(planned.rejectedKindLabels)} to keep a single kind label` +
           (survivor ? `; keeping \`${survivor}\`` : ''),
       );
     }
 
-    if (labelsToRemove.length > 0 && pullRequest.number) {
+    // Additions land first. A removal is often safe only because the new label still
+    // satisfies the policy; deleting the old one and then failing to add its replacement
+    // would make the checks fail a pull request this action had just broken.
+    const added: string[] = [];
+    if (labelsToAdd.length > 0 && pullRequest.number) {
+      try {
+        await octokit.rest.issues.addLabels({
+          ...github.context.repo,
+          issue_number: pullRequest.number,
+          labels: labelsToAdd,
+        });
+        added.push(...labelsToAdd);
+        labelsChanged = true;
+        // Plain label names: `autoAppliedLabels` is also the list shown in the PR
+        // comment, so it must not carry display decoration.
+        autoAppliedLabels.push(...labelsToAdd);
+        aiAnalysisResults.push(
+          `**Labels added by AI:** ${formatListWithBackticks(labelsToAdd)}`,
+        );
+        core.info(`AI added labels: ${labelsToAdd.join(', ')}`);
+      } catch (error) {
+        core.warning(`Failed to apply AI-suggested labels: ${error}`);
+      }
+    }
+
+    const removalsAfterAdd = planLabelEdits(
+      [...currentLabels, ...added],
+      [],
+      labelsToRemove,
+      policy,
+    ).labelsToRemove;
+    const heldBack = labelsToRemove.filter(
+      (label) => !removalsAfterAdd.includes(label),
+    );
+    if (heldBack.length > 0) {
+      core.warning(
+        `Keeping ${formatListWithBackticks(heldBack)} because the replacement label was not applied, and removing ${heldBack.length === 1 ? 'it' : 'them'} would break the label policy.`,
+      );
+    }
+
+    if (removalsAfterAdd.length > 0 && pullRequest.number) {
       // Removals go one call at a time and any of them can fail, so the report is built
       // from what GitHub actually accepted. Listing the requested set instead told
       // readers a label was gone while it was still on the pull request.
       const removed: string[] = [];
-      for (const label of labelsToRemove) {
+      for (const label of removalsAfterAdd) {
         try {
           await octokit.rest.issues.removeLabel({
             ...github.context.repo,
@@ -1068,27 +1135,11 @@ async function performAIAutoLabeling(
       }
     }
 
-    if (labelsToAdd.length > 0 && pullRequest.number) {
-      try {
-        await octokit.rest.issues.addLabels({
-          ...github.context.repo,
-          issue_number: pullRequest.number,
-          labels: labelsToAdd,
-        });
-        labelsChanged = true;
-        // Plain label names: `autoAppliedLabels` is also the list shown in the PR
-        // comment, so it must not carry display decoration.
-        autoAppliedLabels.push(...labelsToAdd);
-        aiAnalysisResults.push(
-          `**Labels added by AI:** ${formatListWithBackticks(labelsToAdd)}`,
-        );
-        core.info(`AI added labels: ${labelsToAdd.join(', ')}`);
-      } catch (error) {
-        core.warning(`Failed to apply AI-suggested labels: ${error}`);
-      }
-    }
-
-    if (labelsToAdd.length === 0 && labelsToRemove.length === 0) {
+    if (
+      labelsToAdd.length === 0 &&
+      labelsToRemove.length === 0 &&
+      !analysis.reasoning
+    ) {
       aiAnalysisResults.push(
         'AI analysis confirmed current labels are appropriate.',
       );
@@ -1105,48 +1156,6 @@ async function performAIAutoLabeling(
 }
 
 /**
- * The labels this run must not end without, given the configured checks.
- *
- * The model is told the policy, but being told is not being bound by it: it removed the
- * only `kind/` label from a pull request whose config required one, and the checks then
- * failed that pull request for a violation this action had just created. A label is
- * protected when it is the last thing satisfying a requirement — removing a duplicate is
- * still allowed.
- */
-function getPolicyProtectedLabels(currentLabels: string[]): Set<string> {
-  const protectedLabels = new Set<string>();
-
-  // Every label in `required_labels_all` is load-bearing on its own.
-  for (const label of getInputArray('required_labels_all')) {
-    if (currentLabels.includes(label)) {
-      protectedLabels.add(label);
-    }
-  }
-
-  // `required_labels_any` and each `required_label_prefixes` category are satisfied by
-  // one member, so only protect that member when it is the last one standing.
-  const requiredAny = getInputArray('required_labels_any');
-  const satisfyingAny = currentLabels.filter((label) =>
-    requiredAny.includes(label),
-  );
-  if (satisfyingAny.length === 1) {
-    protectedLabels.add(satisfyingAny[0] as string);
-  }
-
-  for (const prefixInput of getInputArray('required_label_prefixes')) {
-    const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
-    const satisfying = currentLabels.filter((label) =>
-      label.startsWith(prefix),
-    );
-    if (satisfying.length === 1) {
-      protectedLabels.add(satisfying[0] as string);
-    }
-  }
-
-  return protectedLabels;
-}
-
-/**
  * Describes the configured label policy to the model.
  *
  * Without this the model was guessing at rules it was then judged against — it read the
@@ -1155,32 +1164,30 @@ function getPolicyProtectedLabels(currentLabels: string[]): Set<string> {
  */
 function describeLabelPolicy(): string {
   const rules: string[] = [];
+  const policy = readLabelPolicy();
 
-  const requiredPrefixes = getInputArray('required_label_prefixes');
-  for (const prefixInput of requiredPrefixes) {
-    const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
+  for (const prefix of policy.requiredPrefixes) {
     rules.push(
       `- This pull request MUST keep at least one label whose name literally begins with \`${prefix}\`. Only that exact prefix counts — a label that merely means something similar does not.`,
     );
   }
 
-  const requiredAny = getInputArray('required_labels_any');
-  if (requiredAny.length > 0) {
+  if (policy.requiredAny.length > 0) {
     rules.push(
-      `- It must keep at least one of: ${formatListWithBackticks(requiredAny)}.`,
+      `- It must keep at least one of: ${formatListWithBackticks([...policy.requiredAny])}.`,
     );
   }
 
-  const requiredAll = getInputArray('required_labels_all');
-  if (requiredAll.length > 0) {
+  if (policy.requiredAll.length > 0) {
     rules.push(
-      `- It must keep all of: ${formatListWithBackticks(requiredAll)}.`,
+      `- It must keep all of: ${formatListWithBackticks([...policy.requiredAll])}.`,
     );
   }
 
-  const banned = getInputArray('banned_labels');
-  if (banned.length > 0) {
-    rules.push(`- Never suggest: ${formatListWithBackticks(banned)}.`);
+  if (policy.banned.length > 0) {
+    rules.push(
+      `- Never suggest: ${formatListWithBackticks([...policy.banned])}.`,
+    );
   }
 
   return rules.length > 0
@@ -1331,6 +1338,121 @@ function describeModelError(error: unknown): string {
       ? ` (status ${error.statusCode})`
       : '';
   return `${error.message || error.name}${status}`;
+}
+
+/**
+ * Classifies the pull request with TypeSafe Jev.
+ *
+ * Returns null on any failure. Labelling is an assist, so a bad answer degrades to the
+ * rule-based labels rather than failing the pull request.
+ */
+async function callTypesafeLabeling(
+  apiKey: string,
+  pullRequest: ContentObject,
+  changedFiles: ChangedFile[],
+  repoLabels: ClassifiedLabel[],
+  currentLabels: string[],
+): Promise<AILabelAnalysis | null> {
+  const policy = readLabelPolicy();
+  const request = buildClassificationRequest(
+    {
+      title: pullRequest.title,
+      description:
+        sanitizeString(pullRequest.body, MAX_AI_PROMPT_BODY_LENGTH) || null,
+      head: pullRequest.head?.ref ?? null,
+      base: pullRequest.base?.ref ?? null,
+      changedFiles: changedFiles.slice(0, MAX_AI_PROMPT_FILES).map((file) => ({
+        path: file.filename,
+        additions: file.additions,
+        deletions: file.deletions,
+      })),
+      omittedFileCount: Math.max(0, changedFiles.length - MAX_AI_PROMPT_FILES),
+    },
+    repoLabels,
+    currentLabels,
+    policy.requiredPrefixes,
+  );
+
+  if (!request) {
+    core.info('No labels to classify with TypeSafe Jev.');
+    return null;
+  }
+
+  if (request.omittedKind > 0 || request.omittedNoul > 0) {
+    core.warning(
+      `TypeSafe classification omitted ${request.omittedKind} kind label(s) and ${request.omittedNoul} other label(s) to stay within question limits.`,
+    );
+  }
+
+  const model = resolveTypesafeModel(
+    core.getInput('ai_model'),
+    process.env.TYPESAFE_DEFAULT_MODEL,
+  );
+  const questionCount = Object.keys(request.questions).length;
+  core.info(
+    `Asking TypeSafe Jev ${questionCount} question(s) with model "${model}"`,
+  );
+
+  try {
+    const client = new TypeSafeClient({
+      apiKey,
+      logLevel: 'info',
+      timeout: TYPESAFE_TIMEOUT_MS,
+      logger: {
+        debug(): void {
+          // Request bodies stay out of the log. They are untrusted pull request text,
+          // and debug logging is where the SDK prints them.
+        },
+        info(message: string): void {
+          core.info(message);
+        },
+        warn(message: string): void {
+          core.warning(message);
+        },
+        error(message: string): void {
+          core.warning(message);
+        },
+      },
+    });
+
+    const result = await client.systemOne({
+      model,
+      state: request.state,
+      questions: request.questions,
+    });
+    core.info(
+      `TypeSafe ${result.model} classified labels (${result.usage.input_tokens} input tokens, ${result.usage.output_tokens} output tokens)`,
+    );
+
+    return sanitizeAILabelAnalysis(
+      interpretClassification({
+        model: result.model,
+        answers: result.answers,
+        kindLabels: request.kindLabels,
+        noneKey: request.noneKey,
+        noulLabels: request.noulLabels,
+        currentLabels,
+      }),
+    );
+  } catch (error) {
+    core.warning(
+      `TypeSafe Jev could not classify labels: ${describeTypesafeError(error)}`,
+    );
+    return null;
+  }
+}
+
+function describeTypesafeError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return 'unknown error';
+  }
+  if (error instanceof APIError) {
+    // The SDK message already starts with the status code.
+    return error.requestId
+      ? `${error.message} (request ${error.requestId})`
+      : error.message;
+  }
+  return error.message || error.name;
 }
 
 /**
@@ -1736,7 +1858,7 @@ function checkLabelCategories(pullRequest: ContentObject): void {
   const labels = getLabelNames(pullRequest);
 
   for (const prefixInput of requiredPrefixes) {
-    const prefix = prefixInput.endsWith('/') ? prefixInput : `${prefixInput}/`;
+    const prefix = normalizeLabelPrefix(prefixInput);
     const hasLabelFromCategory = labels.some((label) =>
       label.startsWith(prefix),
     );
