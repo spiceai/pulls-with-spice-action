@@ -116,8 +116,9 @@ jobs:
 | `custom_error_messages`          | JSON object with custom error messages                   | No       | -                     |
 | `spice_api_key`                  | Spice Cloud (or OpenAI) API key for AI features          | No       | -                     |
 | `spice_cloud_region`             | Spice Cloud region (`us-east-1`, `us-west-2`)            | No       | `us-east-1`           |
-| `ai_auto_label`                  | Enable AI label review after the rule-based pass         | No       | `false`               |
-| `ai_model`                       | Model to use for the AI pass                             | No       | `openai`              |
+| `typesafe_api_key`               | TypeSafe API key. When set, Jev classifies labels        | No       | -                     |
+| `ai_auto_label`                  | Enable generative label review after the rule-based pass | No       | `false`               |
+| `ai_model`                       | Model for the generative pass, or a `jev-*` id for Jev   | No       | `openai`              |
 
 ## Native Type and Priority (issues)
 
@@ -230,19 +231,21 @@ model, and applies the additions and removals the model returns.
     ai_auto_label: 'true'
 ```
 
-It runs only when `ai_auto_label` is `true` **and** `spice_api_key` is set, and it never
-fails the run: if the model is unreachable or answers with something unusable, the action
-warns and keeps the rule-based labels.
+The generative pass runs when `ai_auto_label` is `true` **and** `spice_api_key` is set.
+A `typesafe_api_key`, or the `TYPESAFE_API_KEY` environment variable, classifies labels
+with [TypeSafe Jev](https://typesafe.ai) on its own. When that key is set, Jev does the
+classification. Either pass warns and keeps the rule-based labels when the model is
+unreachable or the answer is unusable. Neither pass fails the run for that.
 
-Because it reviews rather than merely suggests, it **removes** labels too. Four limits
-bound what it is allowed to do:
+Because the pass can remove labels, four limits bound what it is allowed to do:
 
 - It can only apply labels that **already exist** in the repository — `addLabels` would
   otherwise create an invented name as a new repository label.
-- It cannot remove a label your configuration requires. If `required_label_prefixes`,
+- It cannot leave a requirement unmet. If `required_label_prefixes`,
   `required_labels_any` or `required_labels_all` would be violated by a removal, the
-  label stays and the action logs why. Without this the pass could strip the last
-  `kind/` label and the checks in the same run would then fail the PR for missing it.
+  label stays and the action logs why. A removal is allowed when another label being
+  added still satisfies that requirement, so `kind/bug` can be replaced with
+  `kind/feature`. `required_labels_all` is kept label by label.
 - It cannot add anything listed in `banned_labels`.
 - It enforces the same one-`kind/`-label rule as the rule-based pass.
 
@@ -289,6 +292,40 @@ to OpenAI, with `spice_cloud_region` ignored. Give `ai_model` a bare OpenAI mode
     ai_auto_label: 'true'
     ai_model: 'gpt-5.4'
 ```
+
+### Using TypeSafe Jev
+
+Set `typesafe_api_key`, or export `TYPESAFE_API_KEY` on the step. The input wins when
+both are present. The key is optional. With it set, Jev classifies the pull request.
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v3
+  with:
+    typesafe_api_key: ${{ secrets.TYPESAFE_API_KEY }}
+```
+
+```yaml
+- uses: spiceai/pulls-with-spice-action@v3
+  env:
+    TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+```
+
+Jev answers typed questions, and every label it can apply already exists in the repository.
+
+- `kind/` labels are mutually exclusive, so they are one choice, including an explicit
+  "none". A choice is applied when its confidence is at least 0.5. A confident choice
+  replaces any other `kind/` label already on the pull request.
+- Every other repository label is a yes/no question, so a prefix such as `area/` can
+  carry more than one label. The label is added when the yes probability is at least
+  0.8, and removed when it is at most 0.2. Values in between leave the label as it is.
+
+The same guards as the generative pass still apply: only existing labels, nothing in
+`banned_labels`, the label policy above, one `kind/` label, and authors with write
+access. The model is `jev-latest`. Set `ai_model` to a Jev id such as `jev-1.13.0` to
+pin a version, or set `TYPESAFE_DEFAULT_MODEL`.
+
+Create a key at [console.typesafe.ai](https://console.typesafe.ai/settings/keys) and
+store it as a repository secret named `TYPESAFE_API_KEY`.
 
 ## Releasing
 

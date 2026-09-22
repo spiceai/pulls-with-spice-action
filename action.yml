@@ -84,12 +84,15 @@ inputs:
     description: 'Spice Cloud region: us-east-1 or us-west-2. Ignored when using an OpenAI key.'
     required: false
     default: 'us-east-1'
+  typesafe_api_key:
+    description: 'Optional TypeSafe API key. When set, TypeSafe Jev classifies labels. Also read from the TYPESAFE_API_KEY environment variable when this input is empty.'
+    required: false
   ai_auto_label:
-    description: 'Review the labels applied to the pull request with an AI model, adding and removing labels it judges wrong'
+    description: 'Review labels with a generative model, adding and removing the ones it judges wrong. A typesafe_api_key classifies labels with Jev whether or not this is set.'
     required: false
     default: 'false'
   ai_model:
-    description: "Model name, passed to the endpoint verbatim. On Spice Cloud this is the model's name in your spicepod; against OpenAI it is a model id such as 'gpt-5.4'."
+    description: "Model name. On Spice Cloud this is the model's name in your spicepod; against OpenAI it is a model id such as 'gpt-5.4'. When typesafe_api_key is set, a value starting with 'jev' pins the Jev model (otherwise jev-latest)."
     required: false
     default: 'openai'
   github_token:
