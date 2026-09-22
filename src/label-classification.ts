@@ -161,6 +161,21 @@ export function reconcileKindLabels(
   };
 }
 
+/**
+ * When an old `kind/` label cannot be removed after its replacement was added, the
+ * pull request would keep both. Return the newly added kind labels that must be
+ * rolled back to restore mutual exclusivity. Non-kind additions are left alone.
+ */
+export function kindAddsToRollback(
+  added: readonly string[],
+  failedRemovals: readonly string[],
+): string[] {
+  if (!failedRemovals.some(isKindLabel)) {
+    return [];
+  }
+  return added.filter(isKindLabel);
+}
+
 function unique(labels: readonly string[]): string[] {
   return [...new Set(labels)];
 }

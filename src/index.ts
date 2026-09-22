@@ -10,6 +10,7 @@ import {
   buildClassificationRequest,
   interpretClassification,
   isKindLabel,
+  kindAddsToRollback,
   normalizeLabelPrefix,
   planLabelEdits,
   reconcileKindLabels,
@@ -1087,7 +1088,9 @@ async function performAIAutoLabeling(
 
     // Additions land first. A removal is often safe only because the new label still
     // satisfies the policy; deleting the old one and then failing to add its replacement
-    // would make the checks fail a pull request this action had just broken.
+    // would make the checks fail a pull request this action had just broken. The opposite
+    // partial failure — add succeeds, old `kind/` removal fails — is handled below by
+    // rolling back the newly added kind label so mutual exclusivity still holds.
     const added: string[] = [];
     if (labelsToAdd.length > 0 && pullRequest.number) {
       try {
@@ -1098,12 +1101,6 @@ async function performAIAutoLabeling(
         });
         added.push(...labelsToAdd);
         labelsChanged = true;
-        // Plain label names: `autoAppliedLabels` is also the list shown in the PR
-        // comment, so it must not carry display decoration.
-        autoAppliedLabels.push(...labelsToAdd);
-        aiAnalysisResults.push(
-          `**Labels added by AI:** ${formatListWithBackticks(labelsToAdd)}`,
-        );
         core.info(`AI added labels: ${labelsToAdd.join(', ')}`);
       } catch (error) {
         core.warning(`Failed to apply AI-suggested labels: ${error}`);
@@ -1127,11 +1124,12 @@ async function performAIAutoLabeling(
       );
     }
 
+    // Removals go one call at a time and any of them can fail, so the report is built
+    // from what GitHub actually accepted. Listing the requested set instead told
+    // readers a label was gone while it was still on the pull request.
+    const removed: string[] = [];
+    const failedRemovals: string[] = [];
     if (removalsAfterAdd.length > 0 && pullRequest.number) {
-      // Removals go one call at a time and any of them can fail, so the report is built
-      // from what GitHub actually accepted. Listing the requested set instead told
-      // readers a label was gone while it was still on the pull request.
-      const removed: string[] = [];
       for (const label of removalsAfterAdd) {
         try {
           await octokit.rest.issues.removeLabel({
@@ -1143,14 +1141,61 @@ async function performAIAutoLabeling(
           labelsChanged = true;
           core.info(`AI removed label: ${label}`);
         } catch (error) {
+          failedRemovals.push(label);
           core.warning(`Failed to remove label ${label}: ${error}`);
         }
       }
-      if (removed.length > 0) {
-        aiAnalysisResults.push(
-          `**Labels removed by AI:** ${formatListWithBackticks(removed)}`,
-        );
+    }
+
+    // If an old kind/ label is still present because its removal failed, rolling back
+    // the replacement restores a single kind label instead of leaving two.
+    const kindRollbacks = kindAddsToRollback(added, failedRemovals);
+    const rolledBack: string[] = [];
+    if (kindRollbacks.length > 0 && pullRequest.number) {
+      for (const label of kindRollbacks) {
+        try {
+          await octokit.rest.issues.removeLabel({
+            ...github.context.repo,
+            issue_number: pullRequest.number,
+            name: label,
+          });
+          rolledBack.push(label);
+          labelsChanged = true;
+          core.warning(
+            `Rolled back newly added \`${label}\` because removing the previous kind label failed; kind/ labels must stay mutually exclusive.`,
+          );
+        } catch (error) {
+          core.warning(
+            `Failed to roll back \`${label}\` after a kind label removal failure: ${error}. The pull request may temporarily have multiple kind/ labels.`,
+          );
+        }
       }
+      for (const label of rolledBack) {
+        const index = added.indexOf(label);
+        if (index >= 0) {
+          added.splice(index, 1);
+        }
+      }
+    }
+
+    // Plain label names: `autoAppliedLabels` is also the list shown in the PR
+    // comment, so it must not carry display decoration. Record only labels that
+    // remained after any kind rollback.
+    if (added.length > 0) {
+      autoAppliedLabels.push(...added);
+      aiAnalysisResults.push(
+        `**Labels added by AI:** ${formatListWithBackticks(added)}`,
+      );
+    }
+    if (removed.length > 0) {
+      aiAnalysisResults.push(
+        `**Labels removed by AI:** ${formatListWithBackticks(removed)}`,
+      );
+    }
+    if (rolledBack.length > 0) {
+      aiAnalysisResults.push(
+        `**Rolled back after failed kind removal:** ${formatListWithBackticks(rolledBack)}`,
+      );
     }
 
     if (

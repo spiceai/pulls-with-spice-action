@@ -6,6 +6,7 @@ import {
   appliesQuestionId,
   buildClassificationRequest,
   interpretClassification,
+  kindAddsToRollback,
   noneOptionKey,
   planLabelEdits,
   resolveTypesafeModel,
@@ -416,5 +417,29 @@ describe('planLabelEdits', () => {
 
     expect(plan.labelsToAdd).toEqual([]);
     expect(plan.rejectedKindLabels).toEqual(['kind/feature', 'kind/docs']);
+  });
+});
+
+describe('kindAddsToRollback', () => {
+  it('rolls back newly added kind labels when an old kind removal failed', () => {
+    expect(
+      kindAddsToRollback(['kind/feature', 'area/docs'], ['kind/bug']),
+    ).toEqual(['kind/feature']);
+  });
+
+  it('does not roll back when only a non-kind removal failed', () => {
+    expect(
+      kindAddsToRollback(['kind/feature', 'area/docs'], ['area/runtime']),
+    ).toEqual([]);
+  });
+
+  it('does not roll back when every kind removal succeeded', () => {
+    expect(kindAddsToRollback(['kind/feature'], [])).toEqual([]);
+  });
+
+  it('returns every newly added kind label when a kind removal failed', () => {
+    expect(
+      kindAddsToRollback(['kind/feature', 'kind/docs'], ['kind/bug', 'area/x']),
+    ).toEqual(['kind/feature', 'kind/docs']);
   });
 });
