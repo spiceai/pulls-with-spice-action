@@ -1,0 +1,14 @@
+// The build's tsconfig excludes tests, and naming `types` there would put the test runner's
+// globals in scope for `src/index.ts` as well. Tests are typechecked here instead, by ts-jest,
+// and emitted as ES modules because that is how Jest loads this dependency graph — see
+// jest.config.js.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node", "jest"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -40,6 +40,8 @@ jobs:
       # would catch a type error in src/.
       - run: npm run typecheck
         if: github.event_name == 'pull_request'
+      - run: npm test
+        if: github.event_name == 'pull_request'
       # dist/ is not committed; it is built here and on release.
       - run: npm run build
         if: github.event_name == 'pull_request'

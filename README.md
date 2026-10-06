@@ -170,6 +170,22 @@ concurrency:
 Keep the `labeled`/`unlabeled` triggers — they are what re-runs the check when someone
 adds the missing label — and let `concurrency` collapse the redundant runs.
 
+### Re-running a run
+
+The checks read the pull request or issue from the API when the run starts, not from the
+event payload. This matters because a payload is a snapshot frozen when the run was
+created, and re-running a workflow replays that snapshot: a gate reading it would report
+the labels, assignees, title and draft state as they were then, so re-running a failed
+check could only ever reproduce the failure, never observe the fix that discharged it.
+
+So **re-running this check re-evaluates the subject as it is now**, and a run that starts
+moments after a pull request is opened sees an assignee or label applied in between.
+
+Reading it needs a token with `pull-requests: read` (the default `github.token` under
+`permissions: pull-requests: write` is enough). Without one, or if the read fails, the
+action warns and falls back to the payload rather than failing the check — an API blip
+should not turn a required check red.
+
 ## Label Prefixes
 
 The `required_label_prefixes` input requires at least one label from each specified prefix category:

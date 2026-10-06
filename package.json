@@ -9,7 +9,7 @@
         "format-check": "prettier --check **/*.ts",
         "lint": "eslint src/**/*.ts",
         "typecheck": "tsc --noEmit",
-        "test": "jest",
+        "test": "NODE_OPTIONS=--experimental-vm-modules jest",
         "all": "npm run format && npm run lint && npm run typecheck && npm run build"
     },
     "keywords": [
