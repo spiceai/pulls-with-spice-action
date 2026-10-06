@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   enforce-pull-with-spice:
-    runs-on: spiceai-macos
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
